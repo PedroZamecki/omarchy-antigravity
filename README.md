@@ -23,8 +23,8 @@ Python 3 script. It builds the same record schema as the other agent collectors:
 
 | Field | Source |
 | --- | --- |
-| `tierLabel` | Live call to `cloudcode-pa.googleapis.com/v1internal:loadCodeAssist` with OAuth token. Returns the allowed tier name, e.g. "Gemini Code Assist". |
-| `limits` | Live call to `cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota` returning per-model quota buckets, usage percentages, and reset timestamps (e.g. Gemini 2.5 Pro, Flash, etc.). |
+| `tierLabel` | Live call to `cloudcode-pa.googleapis.com/v1internal:loadCodeAssist` with OAuth token. Returns the active tier name, e.g. "Antigravity Starter Quota", "Google AI Pro", etc. |
+| `limits` | Live call to `cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` with companion project ID returning authoritative quota groups, usage fractions, and reset timestamps. |
 | `todayTotalTokens` / `todayTokensByModel` / `modelUsage` | Scanned from local conversation transcripts (`~/.gemini/antigravity-cli/brain/*/logs/transcript.jsonl`), tracking model switches and token counts per model. |
 | `todayPrompts` / `totalPrompts` | The CLI's prompt history and transcript records. |
 | `todaySessions` / `totalSessions` / `activeDays` / `activeDates` / `recentDays` | Brain transcripts combined with `conversation_summaries.db` (`~/.gemini/antigravity-cli/`) for 7-day token and prompt activity charts. |
