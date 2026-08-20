@@ -15,7 +15,21 @@ Item {
 
   readonly property int refreshIntervalSec: 60
 
-  Component.onCompleted: runCollector(true)
+  Component.onCompleted: {
+    var pluginDir = manifest && manifest.__sourceDir ? manifest.__sourceDir : (home + "/.config/omarchy/plugins/zamecki.antigravity");
+    installerProcess.command = ["bash", pluginDir + "/install.sh"]
+    installerProcess.running = true
+  }
+
+  Process {
+    id: installerProcess
+    running: false
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") console.warn("zamecki.antigravity install: " + text.trim())
+    }
+    onExited: root.runCollector(true)
+  }
 
   Timer {
     id: refreshTimer
