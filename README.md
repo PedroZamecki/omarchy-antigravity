@@ -1,4 +1,4 @@
-# zamecki.antigravity
+# Antigravity agent integration
 
 Adds the Antigravity CLI (`agy`, Google's Gemini Code Assist terminal agent) as an
 Omarchy agent option, alongside the agents shipped by `omarchy.agents`.
@@ -10,7 +10,7 @@ Omarchy agent option, alongside the agents shipped by `omarchy.agents`.
   shell start). The existing agents panel picks it up automatically and shows a
   new "Antigravity" subscription card.
 - **Defaults → Agent menu entry** — a new `Antigravity` row under
-  *Defaults → Agent* in the omarchy menu. Selecting it installs `agy` on demand
+  _Defaults → Agent_ in the omarchy menu. Selecting it installs `agy` on demand
   via mise (`aqua:google-antigravity/antigravity-cli`) and launches the TUI.
 - **Agent launch** — the bar's agent icon / `omarchy agent` flow launches `agy`
   when Antigravity is the default agent (with `--dangerously-skip-permissions`,
@@ -21,14 +21,14 @@ Omarchy agent option, alongside the agents shipped by `omarchy.agents`.
 The collector (`bin/omarchy-agent-usage-antigravity`) is a dependency-free
 Python 3 script. It builds the same record schema as the other agent collectors:
 
-| Field | Source |
-| --- | --- |
-| `tierLabel` | Live call to `cloudcode-pa.googleapis.com/v1internal:loadCodeAssist` with OAuth token. Returns the active tier name, e.g. "Antigravity Starter Quota", "Google AI Pro", etc. |
-| `limits` | Live call to `cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` with companion project ID returning authoritative quota groups, usage fractions, and reset timestamps. |
-| `todayTotalTokens` / `todayTokensByModel` / `modelUsage` | Scanned from local conversation transcripts (`~/.gemini/antigravity-cli/brain/*/logs/transcript.jsonl`), tracking model switches and token counts per model. |
-| `todayPrompts` / `totalPrompts` | The CLI's prompt history and transcript records. |
-| `todaySessions` / `totalSessions` / `activeDays` / `activeDates` / `recentDays` | Brain transcripts combined with `conversation_summaries.db` (`~/.gemini/antigravity-cli/`) for 7-day token and prompt activity charts. |
-| `usageStatusText` / `authHelpText` | Status banner and help instructions ("Waiting for auth" with `Run \`agy\` to sign in to Antigravity.` when never authed, "Sign-in expired" when credentials expired/invalidated, or rate limit / transport statuses). |
+| Field                                                                           | Source                                                                                                                                                                                                                |
+| ------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tierLabel`                                                                     | Live call to `cloudcode-pa.googleapis.com/v1internal:loadCodeAssist` with OAuth token. Returns the active tier name, e.g. "Antigravity Starter Quota", "Google AI Pro", etc.                                          |
+| `limits`                                                                        | Live call to `cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` with companion project ID returning authoritative quota groups, usage fractions, and reset timestamps.                                 |
+| `todayTotalTokens` / `todayTokensByModel` / `modelUsage`                        | Scanned from local conversation transcripts (`~/.gemini/antigravity-cli/brain/*/logs/transcript.jsonl`), tracking model switches and token counts per model.                                                          |
+| `todayPrompts` / `totalPrompts`                                                 | The CLI's prompt history and transcript records.                                                                                                                                                                      |
+| `todaySessions` / `totalSessions` / `activeDays` / `activeDates` / `recentDays` | Brain transcripts combined with `conversation_summaries.db` (`~/.gemini/antigravity-cli/`) for 7-day token and prompt activity charts.                                                                                |
+| `usageStatusText` / `authHelpText`                                              | Status banner and help instructions ("Waiting for auth" with `Run \`agy\` to sign in to Antigravity.` when never authed, "Sign-in expired" when credentials expired/invalidated, or rate limit / transport statuses). |
 
 When the stored access token expires, the collector automatically refreshes it
 against Google's OAuth2 token endpoint using the stored refresh token. If authentication
