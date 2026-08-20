@@ -1,0 +1,77 @@
+#!/bin/bash
+
+# zamecki.antigravity: Shadow omarchy-agent-usage-update to include user agent collectors.
+# Runs the packaged /usr/share/omarchy/bin/omarchy-agent-usage-update for built-in agents
+# (claude, codex, fireworks...) and concurrently runs any extra collectors in ~/.local/bin/
+# (such as omarchy-agent-usage-antigravity).
+
+packaged=/usr/share/omarchy/bin/omarchy-agent-usage-update
+[[ -f $packaged ]] || packaged=""
+
+USAGE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agents/usage"
+mkdir -p "$USAGE_DIR"
+
+flags=()
+only=()
+declare -A excluded
+
+args=("$@")
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  --force | --limits-only) flags+=("$1") ;;
+  --except)
+    excluded[$2]=1
+    shift
+    ;;
+  *) only+=("$1") ;;
+  esac
+  shift
+done
+
+wanted() {
+  local agent="$1"
+  [[ -n ${excluded[$agent]:-} ]] && return 1
+  (( ${#only[@]} == 0 )) && return 0
+  local candidate
+  for candidate in "${only[@]}"; do
+    [[ $candidate == "$agent" ]] && return 0
+  done
+  return 1
+}
+
+collect() {
+  local collector="$1" agent="$2"
+  local record tmp
+  if ! record=$("$collector" "${flags[@]}") || [[ -z $record ]] || ! jq -e . >/dev/null 2>&1 <<<"$record"; then
+    echo "omarchy-agent-usage-update: $agent collector failed" >&2
+    return 1
+  fi
+  tmp=$(mktemp "$USAGE_DIR/.$agent.XXXXXX")
+  printf '%s\n' "$record" >"$tmp"
+  mv "$tmp" "$USAGE_DIR/$agent.json"
+}
+
+pids=()
+
+# 1. Run packaged updater for system collectors
+if [[ -n $packaged && -x $packaged ]]; then
+  "$packaged" "${args[@]}" &
+  pids+=($!)
+fi
+
+# 2. Run local/user collectors in ~/.local/bin not present in /usr/share/omarchy/bin
+for collector in "$HOME/.local/bin"/omarchy-agent-usage-*; do
+  [[ -x $collector ]] || continue
+  agent="${collector##*/omarchy-agent-usage-}"
+  [[ $agent == "update" || $agent == *.orig || $agent == *.bak ]] && continue
+  [[ -x "/usr/share/omarchy/bin/omarchy-agent-usage-$agent" ]] && continue
+  wanted "$agent" || continue
+  collect "$collector" "$agent" &
+  pids+=($!)
+done
+
+status=0
+for pid in "${pids[@]}"; do
+  wait "$pid" || status=1
+done
+exit $status

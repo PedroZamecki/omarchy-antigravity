@@ -61,9 +61,9 @@ omarchy plugin enable zamecki.antigravity
 1. Installs `fonts/omarchy-antigravity.ttf` (custom glyph built from the Antigravity SVG mark) into `~/.local/share/fonts/`.
 2. Adds or updates the `setup.default.agent.antigravity` row in
    `~/.config/omarchy/extensions/omarchy-menu.jsonc` (using the custom glyph and `"iconFont": "omarchy-antigravity"`).
-3. Installs `omarchy-default-agent` and `omarchy-agent` wrappers into
-   `~/.local/bin/` so the menu rows, bar launch, and keybinding resolve to the
-   Antigravity-aware versions (backing up existing files to `*.orig`).
+3. Installs `omarchy-default-agent`, `omarchy-agent`, and `omarchy-agent-usage-update`
+   wrappers into `~/.local/bin/` so the menu rows, bar launch, and panel refreshes
+   include Antigravity concurrently with built-in agents (backing up existing files to `*.orig`).
 4. Installs the usage collector into `~/.local/bin/` (the service invokes it by
    bare name, like the packaged collectors).
 

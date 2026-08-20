@@ -9,7 +9,7 @@ Item {
   property var shell: null
   property var manifest: null
 
-  readonly property int refreshIntervalSec: 900
+  readonly property int refreshIntervalSec: 120
 
   // The collector resolves via PATH: install.sh copies it to ~/.local/bin,
   // mirroring how packaged collectors (omarchy-agent-usage-fireworks, ...)

@@ -57,7 +57,13 @@ command=(agy --dangerously-skip-permissions)
 [[ -n ${prompt:-} ]] && command=(-p "$prompt")
 
 if [[ $inline == "true" ]]; then
-  exec "${command[@]}"
+  "${command[@]}"
+  ret=$?
+  omarchy-agent-usage-antigravity --write >/dev/null 2>&1 &
+  exit $ret
 else
-  exec omarchy-launch-tui --app-id=org.omarchy.agent "${command[@]}"
+  omarchy-launch-tui --app-id=org.omarchy.agent "${command[@]}"
+  ret=$?
+  omarchy-agent-usage-antigravity --write >/dev/null 2>&1 &
+  exit $ret
 fi

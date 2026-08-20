@@ -12,7 +12,11 @@ PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MENU_FILE="$HOME/.config/omarchy/extensions/omarchy-menu.jsonc"
 MENU_ID="setup.default.agent.antigravity"
 BIN_DIR="$HOME/.local/bin"
-WRAPPERS=("$PLUGIN_DIR/wrappers/omarchy-default-agent" "$PLUGIN_DIR/wrappers/omarchy-agent")
+WRAPPERS=(
+  "$PLUGIN_DIR/wrappers/omarchy-default-agent"
+  "$PLUGIN_DIR/wrappers/omarchy-agent"
+  "$PLUGIN_DIR/wrappers/omarchy-agent-usage-update"
+)
 COLLECTOR="$PLUGIN_DIR/bin/omarchy-agent-usage-antigravity"
 
 mkdir -p "$(dirname "$MENU_FILE")" "$BIN_DIR"
