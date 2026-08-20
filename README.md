@@ -28,10 +28,13 @@ Python 3 script. It builds the same record schema as the other agent collectors:
 | `todayTotalTokens` / `todayTokensByModel` / `modelUsage` | Scanned from local conversation transcripts (`~/.gemini/antigravity-cli/brain/*/logs/transcript.jsonl`), tracking model switches and token counts per model. |
 | `todayPrompts` / `totalPrompts` | The CLI's prompt history and transcript records. |
 | `todaySessions` / `totalSessions` / `activeDays` / `activeDates` / `recentDays` | Brain transcripts combined with `conversation_summaries.db` (`~/.gemini/antigravity-cli/`) for 7-day token and prompt activity charts. |
-| `authHelpText` | "Run `agy` to sign in to Antigravity." when signed out. |
+| `usageStatusText` / `authHelpText` | Status banner and help instructions ("Waiting for auth" with `Run \`agy\` to sign in to Antigravity.` when never authed, "Sign-in expired" when credentials expired/invalidated, or rate limit / transport statuses). |
 
 When the stored access token expires, the collector automatically refreshes it
-against Google's OAuth2 token endpoint using the stored refresh token.
+against Google's OAuth2 token endpoint using the stored refresh token. If authentication
+is invalidated or missing, the collector reports the corresponding auth state
+("Waiting for auth" vs "Sign-in expired"), and gracefully shows last known valid limits
+until re-authentication.
 
 **Fallback tier:** if the user is signed out or the live call fails, the tier
 label falls back to the declared plan in
@@ -73,9 +76,6 @@ omarchy plugin enable zamecki.antigravity
   go through the shell and use the wrappers, so they work. Running
   `omarchy agent` from a terminal with Antigravity as the default prints a clear
   message and exits.
-- Token refresh is handled by the CLI itself; the collector never refreshes
-  tokens. If the keyring entry is missing or expired, the record reports the
-  signed-out state until `agy` is run again.
 
 ## Uninstall
 

@@ -1,21 +1,22 @@
-#!/usr/bin/env python3
-"""Collector for the zamecki.antigravity plugin.
+#!/usr/bin/python3
+# omarchy:summary=Print the Antigravity usage record as JSON
+# omarchy:args=[--force] [--limits-only] [--write]
+# omarchy:hidden=true
+"""Collect Google Antigravity usage into one display-ready JSON record.
 
-Reads Antigravity CLI usage state and writes the agents-panel usage record
-to $XDG_STATE_HOME/omarchy/agents/usage/antigravity.json.
-
-Data sources:
-  1. Antigravity CLI keyring entry (service=gemini, username=antigravity)
-     holding OAuth token JSON. Refreshes access token if expired.
-  2. Live account tier and companion project from Google Cloud Code backend:
-     (cloudcode-pa.googleapis.com/v1internal:loadCodeAssist).
-  3. Live authoritative quota groups, usage fractions, and reset timestamps:
-     (cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary).
-  4. Local token metrics and daily usage parsed directly from CLI transcripts
-     (~/.gemini/antigravity-cli/brain/*/logs/transcript.jsonl) and database
-     (~/.gemini/antigravity-cli/conversation_summaries.db).
+Everything the agents panel shows for Antigravity comes from this one
+command: local transcript stats from ~/.gemini/antigravity-cli/brain,
+the summaries database and history fallbacks, and authoritative rate
+limits from the Google Cloud Code backend. The panel itself only ever
+reads the JSON this prints; it never talks to disk formats or endpoints.
 """
 
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import fcntl
+import hashlib
 import json
 import os
 import re
@@ -23,61 +24,126 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
 
 AGENT_ID = "antigravity"
 AGENT_NAME = "Antigravity"
+AUTH_HELP = "Run `agy` to sign in to Antigravity."
 
-APP_DATA_DIR = os.environ.get("ANTIGRAVITY_APP_DATA_DIR") or os.path.expanduser("~/.gemini/antigravity-cli")
-SUMMARIES_DB = os.path.join(APP_DATA_DIR, "conversation_summaries.db")
-HISTORY_FILE = os.path.join(APP_DATA_DIR, "history.jsonl")
-KEYRING_TOKEN_SERVICE = "gemini"
-KEYRING_TOKEN_USERNAME = "antigravity"
+PROBE_MIN_INTERVAL_SECONDS = 15
+SCAN_REUSE_SECONDS = 20
+LIMITS_ONLY_REUSE_SECONDS = 900
 
-# Antigravity CLI public desktop OAuth client configuration
-OAUTH_CLIENT_ID = bytes([
-    49, 48, 55, 49, 48, 48, 54, 48, 54, 48, 53, 57, 49, 45, 116, 109, 104, 115,
-    115, 105, 110, 50, 104, 50, 49, 108, 99, 114, 101, 50, 51, 53, 118, 116, 111,
-    108, 111, 106, 104, 52, 103, 52, 48, 51, 101, 112, 46, 97, 112, 112, 115, 46,
-    103, 111, 111, 103, 108, 101, 117, 115, 101, 114, 99, 111, 110, 116, 101, 110,
-    116, 46, 99, 111, 109
-]).decode("ascii")
-
-OAUTH_CLIENT_SECRET = bytes([
-    71, 79, 67, 83, 80, 88, 45, 75, 53, 56, 70, 87, 82, 52, 56, 54, 76, 100, 76,
-    74, 49, 109, 76, 66, 56, 115, 88, 67, 52, 122, 54, 113, 68, 65, 102
-]).decode("ascii")
+OAUTH_CLIENTS = [
+    (
+        "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
+        "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",
+    ),
+    (
+        "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
+        "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",
+    ),
+    (
+        "884354919052-36trc1jjb3tguiac32ov6cod268c5blh.apps.googleusercontent.com",
+        "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",
+    ),
+    (
+        "884354919052-36trc1jjb3tguiac32ov6cod268c5blh.apps.googleusercontent.com",
+        "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",
+    ),
+]
 OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 LOAD_CODE_ASSIST_URL = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
 LOAD_CODE_ASSIST_FALLBACK_URL = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
 RETRIEVE_USER_QUOTA_SUMMARY_URL = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
-RETRIEVE_USER_QUOTA_URL = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
 
-CONFIG_PATH = os.path.expanduser("~/.config/omarchy/agents/antigravity.json")
-CACHE_DIR = os.path.expanduser("~/.cache/omarchy/agent-usage")
-CACHE_FILE = os.path.join(CACHE_DIR, "antigravity-cache.json")
-
-USAGE_DIR = os.environ.get(
-    "XDG_STATE_HOME",
-    os.path.expanduser("~/.local/state"),
-) + "/omarchy/agents/usage"
-RECORD_PATH = os.path.join(USAGE_DIR, AGENT_ID + ".json")
+KEYRING_TOKEN_SERVICE = "gemini"
+KEYRING_TOKEN_USERNAME = "antigravity"
 
 FALLBACK_TIER = "Antigravity"
-SIGNED_OUT_HELP = "Run `agy` to sign in to Antigravity."
 
 
-def empty_stats():
+def cache_root() -> Path:
+    root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omarchy" / "agent-usage"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def usage_dir() -> Path:
+    root = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "omarchy" / "agents" / "usage"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def app_data_dir() -> Path:
+    return Path(os.environ.get("ANTIGRAVITY_APP_DATA_DIR") or (Path.home() / ".gemini" / "antigravity-cli"))
+
+
+def config_path() -> Path:
+    return Path.home() / ".config" / "omarchy" / "agents" / "antigravity.json"
+
+
+def local_date_string() -> str:
+    return dt.datetime.now().astimezone().date().isoformat()
+
+
+def recent_date_strings() -> list[str]:
+    today = dt.datetime.now().astimezone().date()
+    return [(today - dt.timedelta(days=offset)).isoformat() for offset in range(6, -1, -1)]
+
+
+def local_date_from_timestamp(value: Any) -> str:
+    if value is None:
+        return local_date_string()
+    if isinstance(value, (int, float)):
+        try:
+            seconds = float(value) / 1000.0 if float(value) > 10_000_000_000 else float(value)
+            return dt.datetime.fromtimestamp(seconds).astimezone().date().isoformat()
+        except Exception:
+            return local_date_string()
+    raw = str(value).strip()
+    if not raw:
+        return local_date_string()
+    try:
+        parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone()
+        return parsed.date().isoformat()
+    except Exception:
+        return local_date_string()
+
+
+def number(value: Any) -> int:
+    try:
+        n = float(value or 0)
+        return round(n) if n == n else 0
+    except Exception:
+        return 0
+
+
+def empty_bucket() -> dict[str, int]:
+    return {
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+    }
+
+
+def empty_stats() -> dict[str, Any]:
+    recent_dates = recent_date_strings()
     return {
         "todayPrompts": 0,
         "todaySessions": 0,
         "todayTotalTokens": 0,
         "todayTokensByModel": {},
-        "recentDays": [],
+        "recentDays": [{"date": day, "messageCount": 0} for day in recent_dates],
         "totalPrompts": 0,
         "totalSessions": 0,
         "activeDays": 0,
@@ -86,140 +152,371 @@ def empty_stats():
     }
 
 
-def base_record(**overrides):
-    record = {
-        "schemaVersion": 1,
-        "id": AGENT_ID,
-        "name": AGENT_NAME,
-        "icon": "\ue908",
-        "iconFont": "omarchy-antigravity",
-        "updatedAt": datetime.now().astimezone().isoformat(),
-        "ready": False,
-        "hasLocalStats": False,
-        "scope": "account",
-        "hasPromptStats": False,
-        "tierLabel": FALLBACK_TIER,
-        "usageStatusText": "",
-        "authHelpText": "",
-        "limits": [],
-    }
-    record.update(empty_stats())
-    record.update(overrides)
-    return record
-
-
-def declared_plan():
+def declared_plan() -> str:
+    cfg_file = config_path()
+    if not cfg_file.is_file():
+        return ""
     try:
-        with open(CONFIG_PATH) as fh:
-            cfg = json.load(fh)
+        cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
         if isinstance(cfg, dict):
             tier = cfg.get("tierLabel") or cfg.get("plan") or cfg.get("tier")
             if isinstance(tier, str) and tier.strip():
                 return tier.strip()
     except (OSError, ValueError):
         pass
+    return ""
+
+
+def read_fresh_json(path: Path, max_age_seconds: float) -> dict[str, Any] | None:
+    if max_age_seconds <= 0 or not path.exists():
+        return None
+    try:
+        age = time.time() - path.stat().st_mtime
+        if 0 <= age <= max_age_seconds:
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
     return None
 
 
-def read_keyring_token():
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    handle_fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(handle_fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n")
+        tmp.chmod(0o644)
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def normalize_model_id(raw_name: str) -> str:
+    if not raw_name:
+        return "gemini-3.7-flash"
+    s = raw_name.lower().strip()
+    s = re.sub(r"\(.*?\)", "", s).strip()
+    s = re.sub(r"[^a-z0-9.]+", "-", s).strip("-")
+    if not s.startswith("gemini") and not s.startswith("claude") and not s.startswith("gpt"):
+        s = "gemini-" + s
+    return s
+
+
+def parse_db_datetime(value: str) -> dt.datetime | None:
+    if not value:
+        return None
+    val = value.strip()
+    try:
+        when = dt.datetime.fromisoformat(val)
+    except ValueError:
+        try:
+            when = dt.datetime.strptime(val, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+    if when.year < 2000:
+        return None
+    return when
+
+
+# ---------------------------------------------------------------- local scan
+
+
+def scan_local_usage(app_dir: Path) -> dict[str, Any]:
+    stats = empty_stats()
+    today_date = dt.datetime.now().astimezone().date()
+    today_str = today_date.isoformat()
+    window = [today_date - dt.timedelta(days=i) for i in range(6, -1, -1)]
+    recent = {d.isoformat(): {"date": d.isoformat(), "messageCount": 0} for d in window}
+
+    today_tokens_by_model: dict[str, int] = {}
+    model_usage: dict[str, dict[str, int]] = {}
+    today_sessions: set[str] = set()
+    total_sessions: set[str] = set()
+    active_dates: set[str] = set()
+    total_prompts = 0
+    today_prompts = 0
+    today_total_tokens = 0
+
+    # 1. Scan conversation transcripts
+    brain_dir = app_dir / "brain"
+    if brain_dir.is_dir():
+        try:
+            for conv_dir in brain_dir.iterdir():
+                if not conv_dir.is_dir():
+                    continue
+                conv_name = conv_dir.name
+                transcript_path = conv_dir / ".system_generated" / "logs" / "transcript.jsonl"
+                if not transcript_path.is_file():
+                    transcript_path = conv_dir / "transcript.jsonl"
+                if not transcript_path.is_file():
+                    continue
+
+                current_model = "gemini-3.7-flash"
+                try:
+                    with transcript_path.open("r", encoding="utf-8", errors="replace") as fh:
+                        for line in fh:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                step = json.loads(line)
+                            except Exception:
+                                continue
+
+                            content = str(step.get("content", ""))
+                            thinking = str(step.get("thinking", ""))
+                            tool_calls = step.get("tool_calls")
+                            created_at_str = step.get("created_at") or ""
+                            step_type = step.get("type", "")
+
+                            step_date_str = local_date_from_timestamp(created_at_str)
+
+                            if "Model Selection" in content:
+                                m = re.search(r"Model Selection\` from .*? to (.+?)\.\s*(?:No need|\Z)", content)
+                                if m:
+                                    current_model = normalize_model_id(m.group(1))
+
+                            input_tokens = 0
+                            output_tokens = 0
+
+                            if step_type == "USER_INPUT":
+                                total_prompts += 1
+                                input_tokens += max(1, len(content) // 4)
+                                if step_date_str == today_str:
+                                    today_prompts += 1
+                            elif step_type in ("PLANNER_RESPONSE", "GENERIC"):
+                                output_tokens += len(content) // 4
+                                if thinking:
+                                    output_tokens += len(thinking) // 4
+                                if tool_calls:
+                                    try:
+                                        output_tokens += len(json.dumps(tool_calls)) // 4
+                                    except Exception:
+                                        pass
+                            elif step_type == "CHECKPOINT":
+                                input_tokens += len(content) // 4
+
+                            total_step_tokens = input_tokens + output_tokens
+                            if total_step_tokens > 0 or step_type == "USER_INPUT":
+                                active_dates.add(step_date_str)
+                                total_sessions.add(conv_name)
+
+                                bucket = model_usage.setdefault(current_model, empty_bucket())
+                                bucket["inputTokens"] += input_tokens
+                                bucket["outputTokens"] += output_tokens
+
+                                if step_date_str in recent:
+                                    recent[step_date_str]["messageCount"] += total_step_tokens
+
+                                if step_date_str == today_str:
+                                    today_sessions.add(conv_name)
+                                    today_total_tokens += total_step_tokens
+                                    today_tokens_by_model[current_model] = (
+                                        today_tokens_by_model.get(current_model, 0) + total_step_tokens
+                                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # 2. Read conversation summaries database for any additional sessions
+    summaries_db = app_dir / "conversation_summaries.db"
+    if summaries_db.is_file():
+        try:
+            conn = sqlite3.connect("file:" + str(summaries_db.resolve()) + "?mode=ro", uri=True, timeout=5)
+            conn.execute("PRAGMA query_only = ON")
+            rows = conn.execute(
+                "SELECT conversation_id, last_user_input_time, last_modified_time FROM conversation_summaries"
+            ).fetchall()
+            conn.close()
+            for cid, luit, lmt in rows:
+                when = parse_db_datetime(str(luit or "")) or parse_db_datetime(str(lmt or ""))
+                if when is None:
+                    continue
+                day_str = when.date().isoformat()
+                active_dates.add(day_str)
+                total_sessions.add(cid or str(when))
+                if day_str == today_str and cid:
+                    today_sessions.add(cid)
+        except Exception:
+            pass
+
+    # 3. Read history.jsonl for prompt history fallback
+    history_file = app_dir / "history.jsonl"
+    if history_file.is_file():
+        try:
+            with history_file.open("r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        item = json.loads(line)
+                        ts = item.get("timestamp")
+                        if ts:
+                            day_str = local_date_from_timestamp(ts)
+                            active_dates.add(day_str)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    stats["totalSessions"] = len(total_sessions)
+    stats["todaySessions"] = len(today_sessions)
+    stats["totalPrompts"] = total_prompts
+    stats["todayPrompts"] = today_prompts
+    stats["todayTotalTokens"] = today_total_tokens
+    stats["todayTokensByModel"] = today_tokens_by_model
+    stats["modelUsage"] = model_usage
+    stats["activeDates"] = sorted(active_dates)
+    stats["activeDays"] = len(active_dates)
+    stats["recentDays"] = [recent[d.isoformat()] for d in window]
+
+    return stats
+
+
+def scan_cache_paths(app_dir: Path) -> tuple[Path, Path]:
+    digest = hashlib.sha1(str(app_dir).encode("utf-8")).hexdigest()[:16]
+    root = cache_root()
+    return root / f"antigravity-scan-{digest}.json", root / f"antigravity-scan-{digest}.lock"
+
+
+def cached_scan(app_dir: Path, max_age_seconds: float) -> dict[str, Any]:
+    cache_file, lock_file = scan_cache_paths(app_dir)
+
+    cached = read_fresh_json(cache_file, max_age_seconds)
+    if cached is not None and isinstance(cached.get("stats"), dict):
+        return cached["stats"]
+
+    with lock_file.open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        cached = read_fresh_json(cache_file, max_age_seconds)
+        if cached is not None and isinstance(cached.get("stats"), dict):
+            return cached["stats"]
+        summary = scan_local_usage(app_dir)
+        write_json(cache_file, {"stats": summary, "scanDate": local_date_string()})
+        return summary
+
+
+# ---------------------------------------------------------------- auth & limits
+
+
+def read_keyring_token() -> tuple[dict[str, Any] | None, str]:
+    """Reads stored OAuth token JSON from secret-tool."""
     try:
         out = subprocess.run(
-            ["secret-tool", "lookup", "service", KEYRING_TOKEN_SERVICE,
-             "username", KEYRING_TOKEN_USERNAME],
-            capture_output=True, text=True, timeout=10,
+            ["secret-tool", "lookup", "service", KEYRING_TOKEN_SERVICE, "username", KEYRING_TOKEN_USERNAME],
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
+    except FileNotFoundError:
+        return None, "no_secret_tool"
     except (OSError, subprocess.TimeoutExpired):
-        return None
+        return None, "secret_tool_error"
+
     if out.returncode != 0 or not out.stdout.strip():
-        return None
+        return None, "empty"
+
     try:
         data = json.loads(out.stdout)
     except ValueError:
-        return None
+        return None, "invalid_json"
+
     token = data.get("token")
     if not isinstance(token, dict):
-        return None
-    return token
+        return None, "no_token_dict"
+
+    return token, "ok"
 
 
-def token_expiry(token):
-    expiry = token.get("expiry")
-    if not isinstance(expiry, str):
-        return None
-    try:
-        return datetime.fromisoformat(expiry)
-    except ValueError:
-        return None
-
-
-def token_is_valid(token):
-    expiry = token_expiry(token)
-    if expiry is None:
+def token_is_valid(token: dict[str, Any]) -> bool:
+    expiry_str = token.get("expiry")
+    if not isinstance(expiry_str, str):
         return True
-    return expiry > datetime.now().astimezone()
+    try:
+        expiry_dt = dt.datetime.fromisoformat(expiry_str)
+        # 60s buffer to prevent edge-of-expiry race conditions
+        return expiry_dt > (dt.datetime.now().astimezone() + dt.timedelta(seconds=60))
+    except ValueError:
+        return True
 
 
-def refresh_access_token(refresh_token):
+class RefreshResult:
+    def __init__(self, access_token: str | None, error_type: str = "", error_code: int = 0):
+        self.access_token = access_token
+        # error_type: "invalid_grant", "transport", "http_error", ""
+        self.error_type = error_type
+        self.error_code = error_code
+
+
+def refresh_oauth_token(refresh_token: str) -> RefreshResult:
     if not refresh_token:
-        return None
-    payload = urllib.parse.urlencode({
-        "client_id": OAUTH_CLIENT_ID,
-        "client_secret": OAUTH_CLIENT_SECRET,
-        "refresh_token": refresh_token,
-        "grant_type": "refresh_token",
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        OAUTH_TOKEN_URL,
-        data=payload,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return data.get("access_token")
-    except (urllib.error.HTTPError, urllib.error.URLError, ValueError, OSError):
-        return None
+        return RefreshResult(None, error_type="invalid_grant")
 
+    last_error_type = "invalid_grant"
+    last_error_code = 0
 
-def get_valid_access_token(token_dict):
-    if not isinstance(token_dict, dict):
-        return None
-    access_token = token_dict.get("access_token")
-    if token_is_valid(token_dict) and access_token:
-        return access_token
-    refresh_token = token_dict.get("refresh_token")
-    if refresh_token:
-        fresh = refresh_access_token(refresh_token)
-        if fresh:
-            return fresh
-    return access_token if access_token else None
-
-
-def read_cache():
-    if os.path.exists(CACHE_FILE):
+    for client_id, client_secret in OAUTH_CLIENTS:
+        payload = urllib.parse.urlencode({
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            OAUTH_TOKEN_URL,
+            data=payload,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
         try:
-            with open(CACHE_FILE, "r") as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    return data
-        except Exception:
-            pass
-    return {}
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                new_token = data.get("access_token")
+                if new_token:
+                    return RefreshResult(new_token)
+        except urllib.error.HTTPError as err:
+            last_error_code = err.code
+            try:
+                body = json.loads(err.read().decode("utf-8", errors="replace"))
+                err_str = str(body.get("error") or "")
+                if "invalid_grant" in err_str or "unauthorized_client" in err_str:
+                    last_error_type = "invalid_grant"
+                else:
+                    last_error_type = "http_error"
+            except Exception:
+                last_error_type = "http_error"
+        except (urllib.error.URLError, TimeoutError, OSError):
+            last_error_type = "transport"
+
+    return RefreshResult(None, error_type=last_error_type, error_code=last_error_code)
 
 
-def write_cache(data):
-    try:
-        os.makedirs(CACHE_DIR, exist_ok=True)
-        with open(CACHE_FILE, "w") as f:
-            json.dump(data, f, indent=2)
-    except Exception:
-        pass
+class BackendResult:
+    def __init__(
+        self,
+        ok: bool,
+        tier_label: str = "",
+        project_id: str = "",
+        limits: list[dict[str, Any]] | None = None,
+        error_type: str = "",  # "unauthenticated", "rate_limited", "transport", "http_error"
+        http_code: int = 0,
+        help_text: str = "",
+        retry_after: str = "",
+    ):
+        self.ok = ok
+        self.tier_label = tier_label
+        self.project_id = project_id
+        self.limits = limits or []
+        self.error_type = error_type
+        self.http_code = http_code
+        self.help_text = help_text
+        self.retry_after = retry_after
 
 
-def post_json_pa(url, payload_dict, access_token, timeout=8):
-    if not access_token:
-        return None
+def post_json(url: str, payload_dict: dict[str, Any], access_token: str, timeout: int = 8) -> tuple[dict[str, Any] | None, BackendResult | None]:
     payload_bytes = json.dumps(payload_dict).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -233,47 +530,29 @@ def post_json_pa(url, payload_dict, access_token, timeout=8):
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.HTTPError, urllib.error.URLError, ValueError, OSError):
-        return None
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            return data, None
+    except urllib.error.HTTPError as error:
+        retry_after = error.headers.get("retry-after", "") if error.headers else ""
+        if error.code in (401, 403):
+            return None, BackendResult(ok=False, error_type="unauthenticated", http_code=error.code)
+        if error.code == 429:
+            return None, BackendResult(ok=False, error_type="rate_limited", http_code=error.code, retry_after=retry_after)
+        return None, BackendResult(
+            ok=False,
+            error_type="http_error",
+            http_code=error.code,
+            help_text=f"Google Cloud Code backend returned status {error.code}. Local Antigravity stats are still shown.",
+        )
+    except Exception:
+        return None, BackendResult(
+            ok=False,
+            error_type="transport",
+            help_text="Couldn't reach Google Cloud Code backend. Retrying shortly. Local Antigravity stats are still shown.",
+        )
 
 
-def fetch_account_info(access_token):
-    """Fetches user tier and companion project ID from loadCodeAssist."""
-    for url in (LOAD_CODE_ASSIST_URL, LOAD_CODE_ASSIST_FALLBACK_URL):
-        data = post_json_pa(url, {}, access_token, timeout=6)
-        if not data or not isinstance(data, dict):
-            continue
-
-        project_id = data.get("cloudaicompanionProject")
-
-        tier_name = None
-        paid_tier = data.get("paidTier")
-        if isinstance(paid_tier, dict) and paid_tier.get("name"):
-            tier_name = str(paid_tier["name"])
-        elif isinstance(data.get("currentTier"), dict) and data["currentTier"].get("name"):
-            tier_name = str(data["currentTier"]["name"])
-        elif isinstance(data.get("allowedTiers"), list) and data["allowedTiers"]:
-            for t in data["allowedTiers"]:
-                if isinstance(t, dict) and t.get("isDefault"):
-                    tier_name = str(t.get("name") or FALLBACK_TIER)
-                    break
-            if not tier_name and isinstance(data["allowedTiers"][0], dict):
-                tier_name = str(data["allowedTiers"][0].get("name") or FALLBACK_TIER)
-
-        return (tier_name or FALLBACK_TIER, project_id)
-
-    return (None, None)
-
-
-def fetch_quota_summary(access_token, project_id):
-    """Fetches authoritative quota groups and remaining fractions."""
-    if not project_id:
-        return None
-    return post_json_pa(RETRIEVE_USER_QUOTA_SUMMARY_URL, {"project": project_id}, access_token, timeout=8)
-
-
-def format_bucket_title(group_name, bucket):
+def format_bucket_title(group_name: str, bucket: dict[str, Any]) -> str:
     gn = (group_name or "").strip()
     window = str(bucket.get("window", "")).strip().capitalize()
 
@@ -289,12 +568,7 @@ def format_bucket_title(group_name, bucket):
     return base or "Limit"
 
 
-def parse_quota_limits(quota_summary):
-    """Converts authoritative quota summary from backend into panel limits.
-
-    Never fabricates fake quotas or fake reset timers: percentages and reset
-    timestamps come directly from the API.
-    """
+def parse_quota_limits(quota_summary: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not quota_summary or not isinstance(quota_summary, dict):
         return []
 
@@ -316,7 +590,6 @@ def parse_quota_limits(quota_summary):
                 except (ValueError, TypeError):
                     continue
 
-                # Meter represents percentage used (0.0 to 1.0)
                 used_pct = max(0.0, min(1.0, 1.0 - rem_frac))
                 reset_time = bucket.get("resetTime") or ""
                 title = format_bucket_title(group_name, bucket)
@@ -331,251 +604,296 @@ def parse_quota_limits(quota_summary):
     return limits
 
 
-def parse_db_datetime(value):
-    if not value:
-        return None
-    value = value.strip()
+def parse_tier_from_account(data: dict[str, Any]) -> tuple[str, str]:
+    project_id = str(data.get("cloudaicompanionProject") or "")
+
+    tier_name = ""
+    paid_tier = data.get("paidTier")
+    if isinstance(paid_tier, dict) and paid_tier.get("name"):
+        tier_name = str(paid_tier["name"])
+    elif isinstance(data.get("currentTier"), dict) and data["currentTier"].get("name"):
+        tier_name = str(data["currentTier"]["name"])
+    elif isinstance(data.get("allowedTiers"), list) and data["allowedTiers"]:
+        for t in data["allowedTiers"]:
+            if isinstance(t, dict) and t.get("isDefault"):
+                tier_name = str(t.get("name") or "")
+                break
+        if not tier_name and isinstance(data["allowedTiers"][0], dict):
+            tier_name = str(data["allowedTiers"][0].get("name") or "")
+
+    return tier_name or FALLBACK_TIER, project_id
+
+
+def probe_antigravity_backend(access_token: str) -> BackendResult:
+    account_data = None
+    account_err = None
+    for url in (LOAD_CODE_ASSIST_URL, LOAD_CODE_ASSIST_FALLBACK_URL):
+        account_data, account_err = post_json(url, {}, access_token, timeout=8)
+        if account_data:
+            break
+        if account_err and account_err.error_type == "unauthenticated":
+            return account_err
+
+    if not account_data:
+        return account_err or BackendResult(ok=False, error_type="http_error")
+
+    tier_name, project_id = parse_tier_from_account(account_data)
+
+    if not project_id:
+        return BackendResult(ok=True, tier_label=tier_name, project_id="", limits=[])
+
+    quota_data, quota_err = post_json(
+        RETRIEVE_USER_QUOTA_SUMMARY_URL,
+        {"project": project_id},
+        access_token,
+        timeout=8,
+    )
+    if not quota_data:
+        if quota_err and quota_err.error_type == "unauthenticated":
+            return quota_err
+        return BackendResult(ok=True, tier_label=tier_name, project_id=project_id, limits=[])
+
+    limits = parse_quota_limits(quota_data)
+    return BackendResult(ok=True, tier_label=tier_name, project_id=project_id, limits=limits)
+
+
+def limit_window_open(entry: dict[str, Any], now: dt.datetime) -> bool:
+    raw = str(entry.get("resetsAt") or "").strip()
+    if not raw:
+        return True
     try:
-        when = datetime.fromisoformat(value)
-    except ValueError:
-        try:
-            when = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            return None
-    if when.year < 2000:
-        return None
-    return when
+        resets_at = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return True
+    if resets_at.tzinfo is None:
+        resets_at = resets_at.replace(tzinfo=dt.timezone.utc)
+    return resets_at > now
 
 
-def normalize_model_id(raw_name):
-    if not raw_name:
-        return "gemini-3.7-flash"
-    s = raw_name.lower().strip()
-    s = re.sub(r"\(.*?\)", "", s).strip()
-    s = re.sub(r"[^a-z0-9.]+", "-", s).strip("-")
-    if not s.startswith("gemini") and not s.startswith("claude") and not s.startswith("gpt"):
-        s = "gemini-" + s
-    return s
+def usable_cached_limits(cached: dict[str, Any]) -> list[dict[str, Any]]:
+    entries = cached.get("limits")
+    if not isinstance(entries, list):
+        return []
+    now = dt.datetime.now(dt.timezone.utc)
+    return [entry for entry in entries if isinstance(entry, dict) and limit_window_open(entry, now)]
 
 
-def usage_stats():
-    stats = empty_stats()
-    today = date.today()
-    window = [today - timedelta(days=i) for i in range(6, -1, -1)]
-    recent = {d: {"date": str(d), "messageCount": 0} for d in window}
+def collect_limits(force: bool) -> dict[str, Any]:
+    result = {
+        "limits": [],
+        "tierLabel": "",
+        "usageStatusText": "",
+        "authHelpText": AUTH_HELP,
+        "retryAdvised": False,
+    }
 
-    today_tokens_by_model = {}
-    model_usage = {}
-    today_sessions = set()
-    total_sessions = set()
-    active_dates = set()
-    total_prompts = 0
-    today_prompts = 0
-    today_total_tokens = 0
+    probe_cache = cache_root() / "antigravity-limits.json"
+    cached = read_fresh_json(probe_cache, float("inf")) or {}
+    fallback = usable_cached_limits(cached)
+    cached_tier = str(cached.get("tierLabel") or "")
 
-    # 1. Scan conversation transcripts for model usage and token metrics
-    brain_dir = os.path.join(APP_DATA_DIR, "brain")
-    if os.path.isdir(brain_dir):
-        try:
-            for conv_name in os.listdir(brain_dir):
-                conv_dir = os.path.join(brain_dir, conv_name)
-                if not os.path.isdir(conv_dir):
-                    continue
-                transcript_path = os.path.join(conv_dir, ".system_generated", "logs", "transcript.jsonl")
-                if not os.path.isfile(transcript_path):
-                    continue
+    token_data, _ = read_keyring_token()
 
-                current_model = "gemini-3.7-flash"
-                try:
-                    with open(transcript_path, "r", encoding="utf-8", errors="replace") as fh:
-                        for line in fh:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            try:
-                                step = json.loads(line)
-                            except Exception:
-                                continue
+    # 1. No account in keyring (never authenticated or signed out)
+    if token_data is None or not isinstance(token_data, dict):
+        result["limits"] = fallback
+        result["tierLabel"] = declared_plan() or cached_tier or FALLBACK_TIER
+        result["usageStatusText"] = "Waiting for auth"
+        result["authHelpText"] = AUTH_HELP
+        return result
 
-                            content = str(step.get("content", ""))
-                            thinking = str(step.get("thinking", ""))
-                            tool_calls = step.get("tool_calls")
-                            created_at_str = step.get("created_at") or ""
-                            step_type = step.get("type", "")
+    access_token = str(token_data.get("access_token") or "")
+    refresh_token = str(token_data.get("refresh_token") or "")
 
-                            step_date = today
-                            if created_at_str:
-                                try:
-                                    step_utc_dt = datetime.fromisoformat(created_at_str.replace("Z", "+00:00")).astimezone(timezone.utc)
-                                    step_date = step_utc_dt.astimezone().date()
-                                except Exception:
-                                    pass
+    if not access_token and not refresh_token:
+        result["limits"] = fallback
+        result["tierLabel"] = declared_plan() or cached_tier or FALLBACK_TIER
+        result["usageStatusText"] = "Waiting for auth"
+        result["authHelpText"] = AUTH_HELP
+        return result
 
-                            if "Model Selection" in content:
-                                m = re.search(r"Model Selection\` from .*? to (.+?)\.\s*(?:No need|\Z)", content)
-                                if m:
-                                    current_model = normalize_model_id(m.group(1))
+    # 2. Check if access token is expired; try refreshing if needed
+    refreshed = False
+    if not token_is_valid(token_data) or not access_token:
+        if refresh_token:
+            refresh_res = refresh_oauth_token(refresh_token)
+            if refresh_res.access_token:
+                access_token = refresh_res.access_token
+                refreshed = True
+            elif refresh_res.error_type == "invalid_grant":
+                result["limits"] = fallback
+                result["tierLabel"] = declared_plan() or cached_tier or FALLBACK_TIER
+                result["usageStatusText"] = "Sign-in expired"
+                result["authHelpText"] = (
+                    "Antigravity's saved sign-in expired"
+                    + (" — showing the last known limits." if fallback else ".")
+                    + " Start Antigravity, or run `agy`, to refresh it."
+                )
+                return result
+            elif refresh_res.error_type == "transport":
+                result["retryAdvised"] = True
+                result["limits"] = fallback
+                result["tierLabel"] = declared_plan() or cached_tier or FALLBACK_TIER
+                if not fallback:
+                    result["usageStatusText"] = "Antigravity limits unavailable"
+                    result["authHelpText"] = (
+                        "Couldn't reach Google OAuth service. Retrying shortly. Local Antigravity stats are still shown."
+                    )
+                return result
+        else:
+            result["limits"] = fallback
+            result["tierLabel"] = declared_plan() or cached_tier or FALLBACK_TIER
+            result["usageStatusText"] = "Sign-in expired"
+            result["authHelpText"] = (
+                "Antigravity's saved sign-in expired"
+                + (" — showing the last known limits." if fallback else ".")
+                + " Start Antigravity, or run `agy`, to refresh it."
+            )
+            return result
 
-                            input_tokens = 0
-                            output_tokens = 0
+    # 3. Probe cache freshness window
+    fetched_at = number(cached.get("fetchedAtMs")) / 1000.0
+    if fallback and not force and not refreshed and (time.time() - fetched_at < PROBE_MIN_INTERVAL_SECONDS):
+        result["limits"] = fallback
+        result["tierLabel"] = cached_tier or declared_plan() or FALLBACK_TIER
+        result["usageStatusText"] = ""
+        result["authHelpText"] = ""
+        return result
 
-                            if step_type == "USER_INPUT":
-                                total_prompts += 1
-                                input_tokens += max(1, len(content) // 4)
-                                if step_date == today:
-                                    today_prompts += 1
-                            elif step_type in ("PLANNER_RESPONSE", "GENERIC"):
-                                output_tokens += len(content) // 4
-                                if thinking:
-                                    output_tokens += len(thinking) // 4
-                                if tool_calls:
-                                    try:
-                                        output_tokens += len(json.dumps(tool_calls)) // 4
-                                    except Exception:
-                                        pass
-                            elif step_type == "CHECKPOINT":
-                                input_tokens += len(content) // 4
+    # 4. Probe live backend
+    probe = probe_antigravity_backend(access_token)
 
-                            total_step_tokens = input_tokens + output_tokens
-                            if total_step_tokens > 0 or step_type == "USER_INPUT":
-                                active_dates.add(step_date)
-                                total_sessions.add(conv_name)
+    # If backend returned 401 Unauthorized, token may have expired server-side: refresh once
+    if not probe.ok and probe.error_type == "unauthenticated" and not refreshed and refresh_token:
+        refresh_res = refresh_oauth_token(refresh_token)
+        if refresh_res.access_token:
+            access_token = refresh_res.access_token
+            refreshed = True
+            probe = probe_antigravity_backend(access_token)
 
-                                bucket = model_usage.setdefault(current_model, {
-                                    "inputTokens": 0,
-                                    "outputTokens": 0,
-                                    "cacheReadInputTokens": 0,
-                                    "cacheCreationInputTokens": 0,
-                                })
-                                bucket["inputTokens"] += input_tokens
-                                bucket["outputTokens"] += output_tokens
+    if probe.ok:
+        tier = probe.tier_label or cached_tier or declared_plan() or FALLBACK_TIER
+        result["limits"] = probe.limits or []
+        result["tierLabel"] = tier
+        result["usageStatusText"] = ""
+        result["authHelpText"] = ""
+        write_json(probe_cache, {
+            "fetchedAtMs": round(time.time() * 1000),
+            "tierLabel": tier,
+            "projectId": probe.project_id,
+            "limits": probe.limits or [],
+        })
+        return result
 
-                                if step_date in recent:
-                                    recent[step_date]["messageCount"] += total_step_tokens
+    # 5. Handle probe failures
+    result["tierLabel"] = declared_plan() or cached_tier or FALLBACK_TIER
 
-                                if step_date == today:
-                                    today_sessions.add(conv_name)
-                                    today_total_tokens += total_step_tokens
-                                    today_tokens_by_model[current_model] = today_tokens_by_model.get(current_model, 0) + total_step_tokens
-                except Exception:
-                    pass
-        except Exception:
-            pass
+    if probe.error_type == "unauthenticated":
+        result["limits"] = fallback
+        result["usageStatusText"] = "Sign-in expired"
+        result["authHelpText"] = (
+            "Antigravity's saved sign-in expired"
+            + (" — showing the last known limits." if fallback else ".")
+            + " Start Antigravity, or run `agy`, to refresh it."
+        )
+        return result
 
-    # 2. Read conversation summaries database for any additional sessions
-    if os.path.exists(SUMMARIES_DB):
-        try:
-            conn = sqlite3.connect("file:" + SUMMARIES_DB + "?mode=ro", uri=True, timeout=5)
-            rows = conn.execute(
-                "SELECT conversation_id, last_user_input_time, last_modified_time FROM conversation_summaries"
-            ).fetchall()
-            conn.close()
-            for cid, luit, lmt in rows:
-                when = parse_db_datetime(luit) or parse_db_datetime(lmt)
-                if when is None:
-                    continue
-                day = when.date()
-                active_dates.add(day)
-                total_sessions.add(cid or str(when))
-                if day == today and cid:
-                    today_sessions.add(cid)
-        except sqlite3.Error:
-            pass
+    if probe.error_type == "transport":
+        result["retryAdvised"] = True
 
-    # 3. Read history.jsonl for prompt history fallback
-    if os.path.exists(HISTORY_FILE):
-        try:
-            with open(HISTORY_FILE, "r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        item = json.loads(line)
-                        ts = item.get("timestamp")
-                        if ts:
-                            ts_sec = float(ts) / 1000.0 if float(ts) > 10_000_000_000 else float(ts)
-                            pday = datetime.fromtimestamp(ts_sec).date()
-                            active_dates.add(pday)
-                    except (ValueError, OSError):
-                        pass
-        except OSError:
-            pass
+    if fallback:
+        result["limits"] = fallback
+    else:
+        result["usageStatusText"] = "Antigravity limits unavailable"
+        if probe.error_type == "rate_limited":
+            retry_text = f" (retry after {probe.retry_after}s)" if probe.retry_after else ""
+            result["authHelpText"] = (
+                f"Google Cloud Code backend is rate limiting checks right now{retry_text}. "
+                "Local Antigravity stats are still shown."
+            )
+        elif probe.error_type == "transport":
+            result["authHelpText"] = (
+                "Couldn't reach Google Cloud Code backend. Retrying shortly. Local Antigravity stats are still shown."
+            )
+        else:
+            result["authHelpText"] = (
+                probe.help_text or "Google Cloud Code backend returned an error. Local Antigravity stats are still shown."
+            )
 
-    stats["totalSessions"] = len(total_sessions)
-    stats["todaySessions"] = len(today_sessions)
-    stats["totalPrompts"] = total_prompts
-    stats["todayPrompts"] = today_prompts
-    stats["todayTotalTokens"] = today_total_tokens
-    stats["todayTokensByModel"] = today_tokens_by_model
-    stats["modelUsage"] = model_usage
-    stats["activeDates"] = sorted(str(d) for d in active_dates)
-    stats["activeDays"] = len(active_dates)
-    stats["recentDays"] = [recent[d] for d in window]
-
-    return stats
+    return result
 
 
-def write_record(record):
-    os.makedirs(USAGE_DIR, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=USAGE_DIR, prefix=AGENT_ID + ".tmp")
+# -------------------------------------------------------------------- record
+
+
+def write_record(record: dict[str, Any]) -> None:
+    target_dir = usage_dir()
+    record_path = target_dir / f"{AGENT_ID}.json"
+    handle_fd, tmp_name = tempfile.mkstemp(dir=target_dir, prefix=f".{AGENT_ID}.", suffix=".tmp")
+    tmp = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w") as fh:
-            json.dump(record, fh, indent=2)
+        with os.fdopen(handle_fd, "w", encoding="utf-8") as fh:
+            json.dump(record, fh, separators=(",", ":"), sort_keys=True)
             fh.write("\n")
-        os.replace(tmp, RECORD_PATH)
-    except OSError:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+        tmp.chmod(0o644)
+        tmp.replace(record_path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
         raise
 
 
-def main():
-    record = base_record()
-    stats = usage_stats()
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Print the Antigravity usage record as JSON")
+    parser.add_argument("--force", action="store_true", help="rescan transcripts and re-probe limits, ignoring caches")
+    parser.add_argument(
+        "--limits-only",
+        action="store_true",
+        help="reuse any recent transcript scan; only the limits probe must be fresh",
+    )
+    parser.add_argument("--cache-seconds", type=float, default=SCAN_REUSE_SECONDS)
+    parser.add_argument("--write", action="store_true", help="also write the record to agents usage state directory")
+    args = parser.parse_args()
+
+    app_dir = app_data_dir()
+    scan_age = 0 if args.force else (LIMITS_ONLY_REUSE_SECONDS if args.limits_only else args.cache_seconds)
+    stats = cached_scan(app_dir, scan_age)
+    limits = collect_limits(args.force)
+
+    record = {
+        "schemaVersion": 1,
+        "id": AGENT_ID,
+        "name": AGENT_NAME,
+        "icon": "\ue908",
+        "iconFont": "omarchy-antigravity",
+        "updatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "ready": (
+            number(stats.get("totalPrompts")) > 0
+            or len(limits["limits"]) > 0
+            or number(stats.get("totalSessions")) > 0
+            or number(stats.get("activeDays")) > 0
+        ),
+        "hasLocalStats": (
+            number(stats.get("totalPrompts")) > 0
+            or number(stats.get("totalSessions")) > 0
+            or number(stats.get("activeDays")) > 0
+        ),
+        "scope": "account",
+        "hasPromptStats": number(stats.get("totalPrompts")) > 0,
+        "tierLabel": limits["tierLabel"],
+        "usageStatusText": limits["usageStatusText"],
+        "authHelpText": limits["authHelpText"],
+        "limits": limits["limits"],
+    }
+    if limits.get("retryAdvised"):
+        record["retryAdvised"] = True
     record.update(stats)
 
-    record["hasLocalStats"] = (
-        record["totalSessions"] > 0
-        or record["activeDays"] > 0
-        or record["totalPrompts"] > 0
-    )
-    record["hasPromptStats"] = record["totalPrompts"] > 0
-
-    token_data = read_keyring_token()
-    access_token = get_valid_access_token(token_data) if token_data else None
-
-    if access_token or token_data:
-        record["ready"] = True
-        tier, project_id = fetch_account_info(access_token)
-
-        cached = read_cache()
-        if not tier:
-            tier = cached.get("tierLabel") or declared_plan() or FALLBACK_TIER
-        if not project_id:
-            project_id = cached.get("projectId")
-
-        record["tierLabel"] = tier
-
-        quota_summary = fetch_quota_summary(access_token, project_id)
-        if quota_summary:
-            record["limits"] = parse_quota_limits(quota_summary)
-            # Update cache with successful response
-            write_cache({
-                "tierLabel": tier,
-                "projectId": project_id,
-                "cachedAt": datetime.now(timezone.utc).isoformat(),
-            })
-        else:
-            record["limits"] = []
-    else:
-        record["tierLabel"] = declared_plan() or record["tierLabel"]
-        record["authHelpText"] = SIGNED_OUT_HELP
-
-    write_record(record)
-    print(json.dumps(record, indent=2))
+    output = json.dumps(record, separators=(",", ":"), sort_keys=True)
+    if args.write or not sys.stdout.isatty():
+        # When invoked by update scripts or background services, always ensure state file is written
+        write_record(record)
+    print(output)
+    return 0
 
 
 if __name__ == "__main__":
