@@ -554,7 +554,20 @@ def post_json(url: str, payload_dict: dict[str, Any], access_token: str, timeout
 
 def format_bucket_title(group_name: str, bucket: dict[str, Any]) -> str:
     gn = (group_name or "").strip()
-    window = str(bucket.get("window", "")).strip().capitalize()
+    raw_window = str(bucket.get("window", "")).strip().lower()
+
+    if "5h" in raw_window or "session" in raw_window or "hour" in raw_window:
+        window = "Session"
+    elif "week" in raw_window:
+        window = "Weekly"
+    elif "month" in raw_window:
+        window = "Monthly"
+    elif "day" in raw_window:
+        window = "Daily"
+    elif raw_window:
+        window = raw_window.capitalize()
+    else:
+        window = ""
 
     if gn.lower() == "claude and gpt models":
         base = "Claude & GPT"
@@ -591,15 +604,18 @@ def parse_quota_limits(quota_summary: dict[str, Any] | None) -> list[dict[str, A
                     continue
 
                 used_pct = max(0.0, min(1.0, 1.0 - rem_frac))
-                reset_time = bucket.get("resetTime") or ""
+                # When no quota has been consumed yet (0% used / 100% remaining), the window has
+                # not started ticking down, so suppress the placeholder reset timestamp.
+                # Once the user begins consuming quota (> 0% used), the authoritative reset timestamp is shown.
+                reset_time = str(bucket.get("resetTime") or "") if used_pct > 0.0 else ""
                 title = format_bucket_title(group_name, bucket)
-                label = bucket.get("displayName") or "Weekly Limit Remaining"
+                label = bucket.get("displayName") or f"{title} Limit Remaining"
 
                 limits.append({
                     "title": title,
                     "label": label,
                     "percent": round(used_pct, 4),
-                    "resetsAt": str(reset_time),
+                    "resetsAt": reset_time,
                 })
     return limits
 
