@@ -1,0 +1,63 @@
+#!/bin/bash
+
+# zamecki.antigravity: Launch the default coding agent in a terminal.
+# Shadows /usr/share/omarchy/bin/omarchy-agent to launch the Antigravity CLI
+# (agy) when it is the default; every other agent is delegated to the packaged
+# command.
+
+packaged=/usr/share/omarchy/bin/omarchy-agent
+[[ -f $packaged ]] || packaged=omarchy-agent
+
+inline=false
+pick=false
+prompt=""
+
+while (($#)); do
+  case "$1" in
+    --inline) inline=true; shift ;;
+    --pick) pick=true; shift ;;
+    --prompt)
+      prompt=${2:?--prompt needs a value}
+      shift 2
+      ;;
+    *)
+      echo "Unexpected argument: $1" >&2
+      echo "To pass a prompt: omarchy agent prompt \"$*\"" >&2
+      exit 1
+      ;;
+  esac
+done
+
+[[ $PWD == "$HOME" && -d $HOME/Work ]] && cd "$HOME/Work"
+
+agent=$(omarchy-default-agent)
+
+if [[ -z $agent ]]; then
+  [[ $pick == "true" ]] && exec omarchy-menu summon setup.default.agent
+  echo "Choose default agent with: omarchy default agent <name>" >&2
+  exit 1
+fi
+
+if [[ $agent != "antigravity" ]]; then
+  args=()
+  [[ $inline == "true" ]] && args+=(--inline)
+  [[ $pick == "true" ]] && args+=(--pick)
+  [[ -n $prompt ]] && args+=(--prompt "$prompt")
+  exec "$packaged" "${args[@]}"
+fi
+
+# The Antigravity binary is agy, not antigravity, so the generic presence check
+# would report a missing command.
+if omarchy-cmd-missing agy; then
+  echo "antigravity is not installed. Choose an installed agent with: omarchy default agent <name>" >&2
+  exit 1
+fi
+
+command=(agy --dangerously-skip-permissions)
+[[ -n ${prompt:-} ]] && command=(-p "$prompt")
+
+if [[ $inline == "true" ]]; then
+  exec "${command[@]}"
+else
+  exec omarchy-launch-tui --app-id=org.omarchy.agent "${command[@]}"
+fi

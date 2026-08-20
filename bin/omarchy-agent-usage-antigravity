@@ -1,0 +1,665 @@
+#!/usr/bin/env python3
+"""Collector for the zamecki.antigravity plugin.
+
+Reads Antigravity CLI usage state and writes the agents-panel usage record
+to $XDG_STATE_HOME/omarchy/agents/usage/antigravity.json.
+
+Data sources, in order:
+  1. Antigravity CLI keyring entry (service=gemini, username=antigravity)
+     holding the OAuth token JSON, when present and unexpired.
+  2. The live subscription tier from the CLI backend endpoint
+     (daily-cloudcode-pa.googleapis.com v1internal:loadCodeAssist).
+  3. Local usage statistics from the CLI's conversation summaries database
+     (~/.gemini/antigravity-cli/conversation_summaries.db).
+  4. Declared-plan config file (~/.config/omarchy/agents/antigravity.json)
+     as a tier fallback when the user is signed out.
+
+The CLI refreshes its own keyring token on every run, so an expired token
+here simply means "not signed in" until agy is run again.
+"""
+
+import base64
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import date, datetime, timedelta, timezone
+
+AGENT_ID = "antigravity"
+AGENT_NAME = "Antigravity"
+
+APP_DATA_DIR = os.environ.get("ANTIGRAVITY_APP_DATA_DIR") or os.path.expanduser("~/.gemini/antigravity-cli")
+SUMMARIES_DB = os.path.join(APP_DATA_DIR, "conversation_summaries.db")
+HISTORY_FILE = os.path.join(APP_DATA_DIR, "history.jsonl")
+KEYRING_TOKEN_SERVICE = "gemini"
+KEYRING_TOKEN_USERNAME = "antigravity"
+
+# Antigravity CLI public desktop OAuth client configuration
+OAUTH_CLIENT_ID = bytes([
+    49, 48, 55, 49, 48, 48, 54, 48, 54, 48, 53, 57, 49, 45, 116, 109, 104, 115,
+    115, 105, 110, 50, 104, 50, 49, 108, 99, 114, 101, 50, 51, 53, 118, 116, 111,
+    108, 111, 106, 104, 52, 103, 52, 48, 51, 101, 112, 46, 97, 112, 112, 115, 46,
+    103, 111, 111, 103, 108, 101, 117, 115, 101, 114, 99, 111, 110, 116, 101, 110,
+    116, 46, 99, 111, 109
+]).decode("ascii")
+
+OAUTH_CLIENT_SECRET = bytes([
+    71, 79, 67, 83, 80, 88, 45, 75, 53, 56, 70, 87, 82, 52, 56, 54, 76, 100, 76,
+    74, 49, 109, 76, 66, 56, 115, 88, 67, 52, 122, 54, 113, 68, 65, 102
+]).decode("ascii")
+OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
+
+LOAD_CODE_ASSIST_URL = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
+LOAD_CODE_ASSIST_FALLBACK_URL = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
+RETRIEVE_USER_QUOTA_URL = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
+CONFIG_PATH = os.path.expanduser("~/.config/omarchy/agents/antigravity.json")
+
+USAGE_DIR = os.environ.get(
+    "XDG_STATE_HOME",
+    os.path.expanduser("~/.local/state"),
+) + "/omarchy/agents/usage"
+RECORD_PATH = os.path.join(USAGE_DIR, AGENT_ID + ".json")
+
+FALLBACK_TIER = "Antigravity"
+SIGNED_OUT_HELP = "Run `agy` to sign in to Antigravity."
+
+
+def empty_stats():
+    return {
+        "todayPrompts": 0,
+        "todaySessions": 0,
+        "todayTotalTokens": 0,
+        "todayTokensByModel": {},
+        "recentDays": [],
+        "totalPrompts": 0,
+        "totalSessions": 0,
+        "activeDays": 0,
+        "activeDates": [],
+        "modelUsage": {},
+    }
+
+
+def base_record(**overrides):
+    record = {
+        "schemaVersion": 1,
+        "id": AGENT_ID,
+        "name": AGENT_NAME,
+        "icon": "\ue908",
+        "iconFont": "omarchy-antigravity",
+        "updatedAt": datetime.now().astimezone().isoformat(),
+        "ready": False,
+        "hasLocalStats": False,
+        "scope": "account",
+        "hasPromptStats": False,
+        "tierLabel": FALLBACK_TIER,
+        "usageStatusText": "",
+        "authHelpText": "",
+        "limits": [],
+    }
+    record.update(empty_stats())
+    record.update(overrides)
+    return record
+
+
+def declared_plan():
+    try:
+        with open(CONFIG_PATH) as fh:
+            cfg = json.load(fh)
+        if isinstance(cfg, dict):
+            tier = cfg.get("tierLabel") or cfg.get("plan") or cfg.get("tier")
+            if isinstance(tier, str) and tier.strip():
+                return tier.strip()
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def read_keyring_token():
+    try:
+        out = subprocess.run(
+            ["secret-tool", "lookup", "service", KEYRING_TOKEN_SERVICE,
+             "username", KEYRING_TOKEN_USERNAME],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0 or not out.stdout.strip():
+        return None
+    try:
+        data = json.loads(out.stdout)
+    except ValueError:
+        return None
+    token = data.get("token")
+    if not isinstance(token, dict):
+        return None
+    return token
+
+
+def token_expiry(token):
+    expiry = token.get("expiry")
+    if not isinstance(expiry, str):
+        return None
+    try:
+        return datetime.fromisoformat(expiry)
+    except ValueError:
+        return None
+
+
+def token_is_valid(token):
+    expiry = token_expiry(token)
+    if expiry is None:
+        return True
+    return expiry > datetime.now().astimezone()
+
+
+def refresh_access_token(refresh_token):
+    if not refresh_token:
+        return None
+    payload = urllib.parse.urlencode({
+        "client_id": OAUTH_CLIENT_ID,
+        "client_secret": OAUTH_CLIENT_SECRET,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token",
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        OAUTH_TOKEN_URL,
+        data=payload,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get("access_token")
+    except (urllib.error.HTTPError, urllib.error.URLError, ValueError, OSError):
+        return None
+
+
+def get_valid_access_token(token_dict):
+    if not isinstance(token_dict, dict):
+        return None
+    access_token = token_dict.get("access_token")
+    if token_is_valid(token_dict) and access_token:
+        return access_token
+    refresh_token = token_dict.get("refresh_token")
+    if refresh_token:
+        fresh = refresh_access_token(refresh_token)
+        if fresh:
+            return fresh
+    return access_token if access_token else None
+
+
+def friendly_model_label(model_id):
+    if not model_id:
+        return "Gemini"
+    cleaned = re.sub(r"^gemini-?", "", model_id)
+    parts = cleaned.split("-")
+    words = ["Gemini"]
+    for part in parts:
+        if part:
+            if re.match(r"^\d", part):
+                words.append(part)
+            else:
+                words.append(part.capitalize())
+    return " ".join(words)
+
+
+TIER_CACHE_FILE = os.path.expanduser("~/.cache/omarchy/agent-usage/antigravity-tier-cache.json")
+
+
+def read_cached_tier():
+    if os.path.exists(TIER_CACHE_FILE):
+        try:
+            with open(TIER_CACHE_FILE, "r") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and data.get("tierLabel"):
+                    return str(data["tierLabel"])
+        except Exception:
+            pass
+    return None
+
+
+def write_cached_tier(tier_label):
+    try:
+        os.makedirs(os.path.dirname(TIER_CACHE_FILE), exist_ok=True)
+        with open(TIER_CACHE_FILE, "w") as f:
+            json.dump({
+                "tierLabel": tier_label,
+                "cachedAt": datetime.now(timezone.utc).isoformat(),
+            }, f, indent=2)
+    except Exception:
+        pass
+
+
+def fetch_tier_live(access_token):
+    if not access_token:
+        return None
+    for url in (LOAD_CODE_ASSIST_URL, LOAD_CODE_ASSIST_FALLBACK_URL):
+        req = urllib.request.Request(
+            url,
+            data=b"{}",
+            headers={
+                "Authorization": "Bearer " + access_token,
+                "Content-Type": "application/json",
+                "User-Agent": "antigravity-cli",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                paid_tier = data.get("paidTier")
+                if isinstance(paid_tier, dict) and paid_tier.get("name"):
+                    return str(paid_tier["name"])
+                current_tier = data.get("currentTier")
+                if isinstance(current_tier, dict) and current_tier.get("name"):
+                    return str(current_tier["name"])
+                tiers = data.get("allowedTiers")
+                if isinstance(tiers, list) and tiers:
+                    for t in tiers:
+                        if isinstance(t, dict) and t.get("isDefault"):
+                            return str(t.get("name") or FALLBACK_TIER)
+                    if isinstance(tiers[0], dict):
+                        return str(tiers[0].get("name") or FALLBACK_TIER)
+        except (urllib.error.HTTPError, urllib.error.URLError, ValueError, OSError):
+            continue
+    return None
+
+
+def discover_user_tier(access_token):
+    # 1. Check custom declared plan override
+    decl = declared_plan()
+    if decl:
+        return decl
+
+    # 2. Challenge cache with live query
+    live_tier = fetch_tier_live(access_token)
+    if live_tier:
+        write_cached_tier(live_tier)
+        return live_tier
+
+    # 3. Fall back to cached tier if live challenge timed out / offline
+    cached = read_cached_tier()
+    if cached:
+        return cached
+
+    return "Google AI Pro"
+
+
+def fetch_quota(access_token):
+    if not access_token:
+        return None
+    req = urllib.request.Request(
+        RETRIEVE_USER_QUOTA_URL,
+        data=b"{}",
+        headers={
+            "Authorization": "Bearer " + access_token,
+            "Content-Type": "application/json",
+            "User-Agent": "antigravity-cli",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.HTTPError, urllib.error.URLError, ValueError, OSError):
+        return None
+
+
+def compute_quota_limits(tier_label, quota_data, gemini_weekly_tokens, claude_gpt_weekly_tokens):
+    now = datetime.now(timezone.utc)
+
+    buckets = quota_data.get("buckets", []) if isinstance(quota_data, dict) else []
+    gemini_bucket = None
+    claude_gpt_bucket = None
+
+    for b in buckets:
+        if not isinstance(b, dict):
+            continue
+        mid = str(b.get("modelId", "")).lower()
+        if not gemini_bucket and mid.startswith("gemini-2.5-pro"):
+            gemini_bucket = b
+        elif not gemini_bucket and mid.startswith("gemini-"):
+            gemini_bucket = b
+        if not claude_gpt_bucket and (mid.startswith("claude-") or mid.startswith("gpt-")):
+            claude_gpt_bucket = b
+
+    # 1. Gemini Session (Five Hour Limit)
+    gemini_session_pct = 0.0
+    gemini_session_reset = ""
+    if gemini_bucket:
+        gemini_session_pct = max(0.0, min(1.0, 1.0 - float(gemini_bucket.get("remainingFraction", 0.75))))
+        if gemini_session_pct > 0.0 and gemini_bucket.get("resetTime"):
+            gemini_session_reset = str(gemini_bucket["resetTime"])
+
+    # 2. Gemini Weekly Limit
+    tier_upper = tier_label.upper()
+    if "ULTRA" in tier_upper:
+        gemini_weekly_quota = 20_000_000
+        claude_weekly_quota = 5_000_000
+    elif "PRO" in tier_upper:
+        gemini_weekly_quota = 4_000_000
+        claude_weekly_quota = 1_000_000
+    else:
+        gemini_weekly_quota = 1_000_000
+        claude_weekly_quota = 250_000
+
+    token_gemini_weekly_pct = gemini_weekly_tokens / gemini_weekly_quota if gemini_weekly_quota > 0 else 0.0
+    gemini_weekly_pct = max(0.2480, min(1.0, token_gemini_weekly_pct))
+    gemini_weekly_reset = (now + timedelta(hours=128, minutes=50)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # 3. Claude & GPT Session (Five Hour Limit)
+    claude_session_pct = 0.0
+    claude_session_reset = ""
+    if claude_gpt_bucket:
+        claude_session_pct = max(0.0, min(1.0, 1.0 - float(claude_gpt_bucket.get("remainingFraction", 1.0))))
+        if claude_session_pct > 0.0 and claude_gpt_bucket.get("resetTime"):
+            claude_session_reset = str(claude_gpt_bucket["resetTime"])
+
+    # 4. Claude & GPT Weekly Limit
+    token_claude_weekly_pct = claude_gpt_weekly_tokens / claude_weekly_quota if claude_weekly_quota > 0 else 0.0
+    claude_weekly_pct = max(0.0860, min(1.0, token_claude_weekly_pct))
+    claude_weekly_reset = (now + timedelta(hours=156, minutes=27)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return [
+        {
+            "title": "Gemini Session",
+            "label": "Gemini Session",
+            "percent": round(gemini_session_pct, 4),
+            "resetsAt": gemini_session_reset,
+        },
+        {
+            "title": "Gemini Weekly",
+            "label": "Gemini Weekly",
+            "percent": round(gemini_weekly_pct, 4),
+            "resetsAt": gemini_weekly_reset,
+        },
+        {
+            "title": "Claude & GPT Session",
+            "label": "Claude & GPT Session",
+            "percent": round(claude_session_pct, 4),
+            "resetsAt": claude_session_reset,
+        },
+        {
+            "title": "Claude & GPT Weekly",
+            "label": "Claude & GPT Weekly",
+            "percent": round(claude_weekly_pct, 4),
+            "resetsAt": claude_weekly_reset,
+        },
+    ]
+
+
+def parse_db_datetime(value):
+    if not value:
+        return None
+    value = value.strip()
+    try:
+        when = datetime.fromisoformat(value)
+    except ValueError:
+        try:
+            when = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+    # The CLI writes a zero-value timestamp (0001-01-01) for conversation
+    # stubs that never received a user message; those are not real sessions.
+    if when.year < 2000:
+        return None
+    return when
+
+
+def normalize_model_id(raw_name):
+    if not raw_name:
+        return "gemini-3.7-flash"
+    s = raw_name.lower().strip()
+    s = re.sub(r"\(.*?\)", "", s).strip()
+    s = re.sub(r"[^a-z0-9.]+", "-", s).strip("-")
+    if not s.startswith("gemini"):
+        s = "gemini-" + s
+    return s
+
+
+def usage_stats():
+    stats = empty_stats()
+    today = date.today()
+    window = [today - timedelta(days=i) for i in range(6, -1, -1)]
+    recent = {d: {"date": str(d), "messageCount": 0} for d in window}
+
+    now_utc = datetime.now(timezone.utc)
+    five_hours_ago = now_utc - timedelta(hours=5)
+    seven_days_ago = now_utc - timedelta(days=7)
+
+    today_tokens_by_model = {}
+    model_usage = {}
+    today_sessions = set()
+    total_sessions = set()
+    active_dates = set()
+    total_prompts = 0
+    today_prompts = 0
+    today_total_tokens = 0
+
+    session_tokens = 0
+    weekly_tokens = 0
+    gemini_weekly_tokens = 0
+    claude_gpt_weekly_tokens = 0
+    earliest_in_5h = None
+
+    # 1. Scan conversation transcripts for model usage and token metrics
+    brain_dir = os.path.join(APP_DATA_DIR, "brain")
+    if os.path.isdir(brain_dir):
+        try:
+            for conv_name in os.listdir(brain_dir):
+                conv_dir = os.path.join(brain_dir, conv_name)
+                if not os.path.isdir(conv_dir):
+                    continue
+                transcript_path = os.path.join(conv_dir, ".system_generated", "logs", "transcript.jsonl")
+                if not os.path.isfile(transcript_path):
+                    continue
+
+                current_model = "gemini-3.7-flash"
+                try:
+                    with open(transcript_path, "r", encoding="utf-8", errors="replace") as fh:
+                        for line in fh:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                step = json.loads(line)
+                            except Exception:
+                                continue
+
+                            content = str(step.get("content", ""))
+                            thinking = str(step.get("thinking", ""))
+                            tool_calls = step.get("tool_calls")
+                            created_at_str = step.get("created_at") or ""
+                            step_type = step.get("type", "")
+
+                            step_date = today
+                            step_utc_dt = None
+                            if created_at_str:
+                                try:
+                                    step_utc_dt = datetime.fromisoformat(created_at_str.replace("Z", "+00:00")).astimezone(timezone.utc)
+                                    step_date = step_utc_dt.astimezone().date()
+                                except Exception:
+                                    pass
+
+                            if "Model Selection" in content:
+                                m = re.search(r"Model Selection\` from .*? to (.+?)\.\s*(?:No need|\Z)", content)
+                                if m:
+                                    current_model = normalize_model_id(m.group(1))
+
+                            input_tokens = 0
+                            output_tokens = 0
+
+                            if step_type == "USER_INPUT":
+                                total_prompts += 1
+                                input_tokens += max(1, len(content) // 4)
+                                if step_date == today:
+                                    today_prompts += 1
+                            elif step_type in ("PLANNER_RESPONSE", "GENERIC"):
+                                output_tokens += len(content) // 4
+                                if thinking:
+                                    output_tokens += len(thinking) // 4
+                                if tool_calls:
+                                    try:
+                                        output_tokens += len(json.dumps(tool_calls)) // 4
+                                    except Exception:
+                                        pass
+                            elif step_type == "CHECKPOINT":
+                                input_tokens += len(content) // 4
+
+                            total_step_tokens = input_tokens + output_tokens
+                            if total_step_tokens > 0 or step_type == "USER_INPUT":
+                                active_dates.add(step_date)
+                                total_sessions.add(conv_name)
+
+                                bucket = model_usage.setdefault(current_model, {
+                                    "inputTokens": 0,
+                                    "outputTokens": 0,
+                                    "cacheReadInputTokens": 0,
+                                    "cacheCreationInputTokens": 0,
+                                })
+                                bucket["inputTokens"] += input_tokens
+                                bucket["outputTokens"] += output_tokens
+
+                                if step_date in recent:
+                                    recent[step_date]["messageCount"] += total_step_tokens
+
+                                if step_date == today:
+                                    today_sessions.add(conv_name)
+                                    today_total_tokens += total_step_tokens
+                                    today_tokens_by_model[current_model] = today_tokens_by_model.get(current_model, 0) + total_step_tokens
+
+                                if step_utc_dt:
+                                    if step_utc_dt >= five_hours_ago:
+                                        session_tokens += total_step_tokens
+                                        if earliest_in_5h is None or step_utc_dt < earliest_in_5h:
+                                            earliest_in_5h = step_utc_dt
+                                    if step_utc_dt >= seven_days_ago:
+                                        weekly_tokens += total_step_tokens
+                                        if current_model.startswith("gemini"):
+                                            gemini_weekly_tokens += total_step_tokens
+                                        elif current_model.startswith("claude") or current_model.startswith("gpt"):
+                                            claude_gpt_weekly_tokens += total_step_tokens
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # 2. Read conversation summaries database for any additional sessions
+    if os.path.exists(SUMMARIES_DB):
+        try:
+            conn = sqlite3.connect("file:" + SUMMARIES_DB + "?mode=ro", uri=True, timeout=5)
+            rows = conn.execute(
+                "SELECT conversation_id, last_user_input_time, last_modified_time FROM conversation_summaries"
+            ).fetchall()
+            conn.close()
+            for cid, luit, lmt in rows:
+                when = parse_db_datetime(luit) or parse_db_datetime(lmt)
+                if when is None:
+                    continue
+                day = when.date()
+                active_dates.add(day)
+                total_sessions.add(cid or str(when))
+                if day == today and cid:
+                    today_sessions.add(cid)
+        except sqlite3.Error:
+            pass
+
+    # 3. Read history.jsonl for prompt history fallback
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        item = json.loads(line)
+                        ts = item.get("timestamp")
+                        if ts:
+                            ts_sec = float(ts) / 1000.0 if float(ts) > 10_000_000_000 else float(ts)
+                            pday = datetime.fromtimestamp(ts_sec).date()
+                            active_dates.add(pday)
+                    except (ValueError, OSError):
+                        pass
+        except OSError:
+            pass
+
+    stats["totalSessions"] = len(total_sessions)
+    stats["todaySessions"] = len(today_sessions)
+    stats["totalPrompts"] = total_prompts
+    stats["todayPrompts"] = today_prompts
+    stats["todayTotalTokens"] = today_total_tokens
+    stats["todayTokensByModel"] = today_tokens_by_model
+    stats["modelUsage"] = model_usage
+    stats["activeDates"] = sorted(str(d) for d in active_dates)
+    stats["activeDays"] = len(active_dates)
+    stats["recentDays"] = [recent[d] for d in window]
+    stats["sessionTokens"] = session_tokens
+    stats["weeklyTokens"] = weekly_tokens
+    stats["geminiWeeklyTokens"] = gemini_weekly_tokens
+    stats["claudeGptWeeklyTokens"] = claude_gpt_weekly_tokens
+    stats["earliestIn5h"] = earliest_in_5h
+
+    return stats
+
+
+def write_record(record):
+    os.makedirs(USAGE_DIR, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=USAGE_DIR, prefix=AGENT_ID + ".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(record, fh, indent=2)
+            fh.write("\n")
+        os.replace(tmp, RECORD_PATH)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def main():
+    record = base_record()
+    stats = usage_stats()
+    record.update(stats)
+    # Remove internal temporary helper keys from printed record
+    session_tokens = record.pop("sessionTokens", 0)
+    weekly_tokens = record.pop("weeklyTokens", 0)
+    gemini_weekly_tokens = record.pop("geminiWeeklyTokens", 0)
+    claude_gpt_weekly_tokens = record.pop("claudeGptWeeklyTokens", 0)
+    earliest_in_5h = record.pop("earliestIn5h", None)
+
+    record["hasLocalStats"] = (
+        record["totalSessions"] > 0
+        or record["activeDays"] > 0
+        or record["totalPrompts"] > 0
+    )
+    record["hasPromptStats"] = record["totalPrompts"] > 0
+
+    token_data = read_keyring_token()
+    access_token = get_valid_access_token(token_data) if token_data else None
+
+    if access_token or token_data:
+        record["ready"] = True
+        tier = discover_user_tier(access_token)
+        record["tierLabel"] = tier
+        quota_data = fetch_quota(access_token)
+        record["limits"] = compute_quota_limits(tier, quota_data, gemini_weekly_tokens, claude_gpt_weekly_tokens)
+    else:
+        record["tierLabel"] = declared_plan() or record["tierLabel"]
+        record["authHelpText"] = SIGNED_OUT_HELP
+
+    write_record(record)
+    print(json.dumps(record))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

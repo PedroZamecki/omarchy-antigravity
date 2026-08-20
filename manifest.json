@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "zamecki.antigravity",
+  "name": "Antigravity Agent",
+  "version": "1.0.0",
+  "author": "Pedro Zamecki Andrade",
+  "license": "MIT",
+  "description": "Adds the Antigravity CLI (agy) as an Omarchy agent option: subscription tab in the agents panel, Defaults -> Agent menu entry, and on-demand install via mise (aqua:google-antigravity/antigravity-cli).",
+  "kinds": [
+    "service"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "service": "Service.qml"
+  },
+  "omarchy": {
+    "requires": [
+      "omarchy.agents"
+    ]
+  }
+}
