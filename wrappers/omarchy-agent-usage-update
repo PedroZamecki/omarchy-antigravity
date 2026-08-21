@@ -59,13 +59,17 @@ if [[ -n $packaged && -x $packaged ]]; then
   pids+=($!)
 fi
 
-# 2. Run local/user collectors in ~/.local/bin not present in /usr/share/omarchy/bin
-for collector in "$HOME/.local/bin"/omarchy-agent-usage-*; do
+# 2. Run collectors shipped by plugins, plus any left in ~/.local/bin, that are
+#    not already covered by /usr/share/omarchy/bin.
+declare -A seen
+for collector in "$HOME/.config/omarchy/plugins"/*/bin/omarchy-agent-usage-* "$HOME/.local/bin"/omarchy-agent-usage-*; do
   [[ -x $collector ]] || continue
   agent="${collector##*/omarchy-agent-usage-}"
   [[ $agent == "update" || $agent == *.orig || $agent == *.bak ]] && continue
+  [[ -n ${seen[$agent]:-} ]] && continue
   [[ -x "/usr/share/omarchy/bin/omarchy-agent-usage-$agent" ]] && continue
   wanted "$agent" || continue
+  seen[$agent]=1
   collect "$collector" "$agent" &
   pids+=($!)
 done

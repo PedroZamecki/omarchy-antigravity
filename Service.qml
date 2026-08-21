@@ -7,18 +7,34 @@ Item {
 
   property var shell: null
   property var manifest: null
+  property var pluginRegistry: null
 
   readonly property string home: Quickshell.env("HOME") || ""
   readonly property string usageDir: (Quickshell.env("XDG_STATE_HOME") || home + "/.local/state") + "/omarchy/agents/usage"
-  readonly property string collectorPath: home + "/.local/bin/omarchy-agent-usage-antigravity"
+  readonly property string pluginDir: manifest && manifest.__sourceDir ? manifest.__sourceDir : (home + "/.config/omarchy/plugins/zamecki.antigravity")
+  readonly property string collectorPath: pluginDir + "/bin/omarchy-agent-usage-antigravity"
   readonly property string historyFile: home + "/.gemini/antigravity-cli/history.jsonl"
 
   readonly property int refreshIntervalSec: 60
 
+  // The menu row and the agents tab both name this family; loading it here keeps
+  // it to the shell process instead of installing a system font.
+  FontLoader {
+    source: Qt.resolvedUrl("fonts/omarchy-antigravity.ttf")
+  }
+
   Component.onCompleted: {
-    var pluginDir = manifest && manifest.__sourceDir ? manifest.__sourceDir : (home + "/.config/omarchy/plugins/zamecki.antigravity");
     installerProcess.command = ["bash", pluginDir + "/install.sh"]
     installerProcess.running = true
+  }
+
+  // Omarchy has no uninstall hook, so this stands in for one. The service is
+  // destroyed both on shell shutdown and on disable/remove, and only the latter
+  // has already flipped the plugin to disabled -- anything else, including not
+  // being handed a registry, leaves the install alone.
+  Component.onDestruction: {
+    if (!pluginRegistry || pluginRegistry.isEnabled("zamecki.antigravity") !== false) return
+    Quickshell.execDetached(["bash", pluginDir + "/uninstall.sh"])
   }
 
   Process {

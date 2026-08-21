@@ -3,32 +3,27 @@
 # zamecki.antigravity uninstaller.
 #
 # Undoes everything done by install.sh:
-# - Disables the plugin in Omarchy
 # - Removes the Defaults -> Agent menu entry
-# - Restores or removes CLI wrappers and usage collector from ~/.local/bin
-# - Removes the icon font from ~/.local/share/fonts
+# - Removes the CLI shims from ~/.local/bin
 # - Cleans up usage state and cache files
 #
-# Idempotent: safe to run multiple times.
+# Runs automatically from Service.qml when the plugin is disabled or removed;
+# also safe to run by hand. Idempotent.
+#
+# It deliberately does not disable the plugin: it is normally invoked *because*
+# the plugin was just disabled.
 
 set -euo pipefail
 
-PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MENU_FILE="$HOME/.config/omarchy/extensions/omarchy-menu.jsonc"
 MENU_ID="setup.default.agent.antigravity"
 BIN_DIR="$HOME/.local/bin"
-WRAPPERS=("omarchy-default-agent" "omarchy-agent" "omarchy-agent-usage-update")
-COLLECTOR_NAME="omarchy-agent-usage-antigravity"
-FONT_PATH="$HOME/.local/share/fonts/omarchy-antigravity.ttf"
+SHIMS=(omarchy-default-agent omarchy-agent omarchy-agent-usage-update)
+MARKER='# zamecki.antigravity shim'
 STATE_FILE="$HOME/.local/state/omarchy/agents/usage/antigravity.json"
-CACHE_FILE="$HOME/.cache/omarchy/agent-usage/antigravity-tier-cache.json"
+CACHE_DIR="$HOME/.cache/omarchy/agent-usage"
 DEFAULT_AGENT_FILE="$HOME/.config/omarchy/defaults/agent"
-
-# --- Disable plugin ---------------------------------------------------------
-if command -v omarchy >/dev/null 2>&1; then
-  omarchy plugin disable zamecki.antigravity 2>/dev/null || true
-  echo "plugin: disabled zamecki.antigravity"
-fi
+LEGACY_FONT="$HOME/.local/share/fonts/omarchy-antigravity.ttf"
 
 # --- Menu row ---------------------------------------------------------------
 if [[ -f $MENU_FILE ]]; then
@@ -57,36 +52,17 @@ print("menu: removed " + key)
 PYEOF
 fi
 
-# --- Wrappers ---------------------------------------------------------------
-for name in "${WRAPPERS[@]}"; do
+# --- Shims ------------------------------------------------------------------
+# Only remove files carrying our marker, so a command someone else put on PATH
+# under the same name survives.
+for name in "${SHIMS[@]}"; do
   dst="$BIN_DIR/$name"
-  if [[ -f "$dst.orig" ]]; then
-    mv "$dst.orig" "$dst"
-    echo "wrapper: restored $dst from .orig"
-  elif [[ -f "$dst" ]]; then
+  [[ -f $dst && ! -L $dst ]] || continue
+  if grep -qFx "$MARKER" "$dst" 2>/dev/null; then
     rm -f "$dst"
-    echo "wrapper: removed $dst"
+    echo "shim: removed $dst"
   fi
 done
-
-# --- Collector --------------------------------------------------------------
-collector_dst="$BIN_DIR/$COLLECTOR_NAME"
-if [[ -f "$collector_dst.orig" ]]; then
-  mv "$collector_dst.orig" "$collector_dst"
-  echo "collector: restored $collector_dst from .orig"
-elif [[ -f "$collector_dst" ]]; then
-  rm -f "$collector_dst"
-  echo "collector: removed $collector_dst"
-fi
-
-# --- Icon Font --------------------------------------------------------------
-if [[ -f $FONT_PATH ]]; then
-  rm -f "$FONT_PATH"
-  echo "font: removed $FONT_PATH"
-  if command -v fc-cache >/dev/null 2>&1; then
-    fc-cache -f "$(dirname "$FONT_PATH")" >/dev/null 2>&1 || true
-  fi
-fi
 
 # --- State & Cache ----------------------------------------------------------
 if [[ -f $STATE_FILE ]]; then
@@ -94,12 +70,29 @@ if [[ -f $STATE_FILE ]]; then
   echo "state: removed $STATE_FILE"
 fi
 
-if [[ -f $CACHE_FILE ]]; then
-  rm -f "$CACHE_FILE"
-  echo "cache: removed $CACHE_FILE"
+# The collector's cache filenames include a hash suffix (antigravity-limits.json,
+# antigravity-scan-<hash>.json/.lock), so glob rather than naming them one by one.
+shopt -s nullglob
+cache_files=("$CACHE_DIR"/antigravity-*)
+shopt -u nullglob
+if ((${#cache_files[@]} > 0)); then
+  rm -f "${cache_files[@]}"
+  echo "cache: removed ${#cache_files[@]} file(s) from $CACHE_DIR"
+fi
+
+# --- Legacy font --------------------------------------------------------------
+# Older versions installed the icon font system-wide; current Service.qml loads
+# it at runtime instead. Clean it up here too in case uninstall runs before
+# install.sh ever gets a chance to (its own legacy sweep covers the same file).
+if [[ -f $LEGACY_FONT ]]; then
+  rm -f "$LEGACY_FONT"
+  command -v fc-cache >/dev/null 2>&1 && fc-cache -f "$(dirname "$LEGACY_FONT")" >/dev/null 2>&1
+  echo "legacy: removed $LEGACY_FONT"
 fi
 
 # --- Default Agent ----------------------------------------------------------
+# Nothing can launch antigravity once the shims are gone, so leaving it selected
+# would only earn an "Unsupported default agent" from the packaged omarchy-agent.
 if [[ -f $DEFAULT_AGENT_FILE ]] && [[ "$(< "$DEFAULT_AGENT_FILE")" == "antigravity" ]]; then
   rm -f "$DEFAULT_AGENT_FILE"
   echo "defaults: cleared antigravity default agent setting"
