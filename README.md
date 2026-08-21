@@ -1,5 +1,7 @@
 # Antigravity agent integration
 
+![preview](preview.png)
+
 Adds the Antigravity CLI (`agy`, Google's Gemini Code Assist terminal agent) as an
 Omarchy agent option, alongside the agents shipped by `omarchy.agents`.
 
@@ -9,9 +11,21 @@ Omarchy agent option, alongside the agents shipped by `omarchy.agents`.
   `~/.local/state/omarchy/agents/usage/antigravity.json` every 15 minutes (and at
   shell start). The existing agents panel picks it up automatically and shows a
   new "Antigravity" subscription card.
+
+  <p>
+    <img src="assets/agent_tab_example.png" alt="Antigravity Agent Tab - Pro Account" height="300" />
+    <img src="assets/free_account_starter_quota.png" alt="Antigravity Agent Tab - Starter Quota" height="300" />
+    <img src="assets/needs_auth.png" alt="Antigravity Agent Tab - Authentication Required" height="100" style="vertical-align: top;" />
+  </p>
+
 - **Defaults → Agent menu entry** — a new `Antigravity` row under
   _Defaults → Agent_ in the omarchy menu. Selecting it installs `agy` on demand
   via mise (`aqua:google-antigravity/antigravity-cli`) and launches the TUI.
+
+  <p>
+    <img src="assets/default_agent_selection.png" alt="Omarchy Default Agent Menu" height="300" />
+    <img src="assets/auto_agent_install_default_agent.png" alt="On-demand Installation via Aqua" height="300" />
+  </p>
 - **Agent launch** — the bar's agent icon / `omarchy agent` flow launches `agy`
   when Antigravity is the default agent (with `--dangerously-skip-permissions`,
   or `agy -p "<prompt>"` for a one-shot prompt).
@@ -48,24 +62,34 @@ When it is absent, the neutral label `Antigravity` is used.
 
 ## Install
 
-The plugin must be enabled so its service runs. The menu row and the wrappers are
-installed by `install.sh`:
-
 ```sh
-~/.config/omarchy/plugins/zamecki.antigravity/install.sh
 omarchy plugin enable zamecki.antigravity
 ```
 
-`install.sh` is idempotent and safe to re-run after `omarchy refresh`. It:
+Enabling is all that is needed: the service runs `install.sh` itself on load.
+The script is idempotent and safe to re-run by hand after `omarchy refresh`:
 
-1. Installs `fonts/omarchy-antigravity.ttf` (custom glyph built from the Antigravity SVG mark) into `~/.local/share/fonts/`.
-2. Adds or updates the `setup.default.agent.antigravity` row in
-   `~/.config/omarchy/extensions/omarchy-menu.jsonc` (using the custom glyph and `"iconFont": "omarchy-antigravity"`).
-3. Installs `omarchy-default-agent`, `omarchy-agent`, and `omarchy-agent-usage-update`
-   wrappers into `~/.local/bin/` so the menu rows, bar launch, and panel refreshes
-   include Antigravity concurrently with built-in agents (backing up existing files to `*.orig`).
-4. Installs the usage collector into `~/.local/bin/` (the service invokes it by
-   bare name, like the packaged collectors).
+```sh
+~/.config/omarchy/plugins/zamecki.antigravity/install.sh
+```
+
+It touches exactly two places outside the plugin folder:
+
+1. Adds or updates the `setup.default.agent.antigravity` row in
+   `~/.config/omarchy/extensions/omarchy-menu.jsonc`. The row carries a `when:`
+   guard on the plugin folder, so it renders nothing if the plugin is gone.
+2. Writes three six-line shims into `~/.local/bin/` — `omarchy-default-agent`,
+   `omarchy-agent`, and `omarchy-agent-usage-update` — so the menu rows, bar
+   launch, and panel refreshes include Antigravity alongside the built-in agents.
+   Each shim only forwards to the matching script in this plugin's `wrappers/`.
+
+Nothing is installed system-wide and no backup files are created. The icon font
+(`fonts/omarchy-antigravity.ttf`, a custom glyph built from the Antigravity SVG
+mark) is loaded into the shell process by `Service.qml`, and the usage collector
+runs from `bin/` in place.
+
+`install.sh` refuses to touch a `~/.local/bin` entry it did not create, and
+refuses to write through a symlink, rather than overwriting either.
 
 ## Known limitations
 
@@ -79,14 +103,28 @@ omarchy plugin enable zamecki.antigravity
 
 ## Uninstall
 
-To remove all installed system extensions, font, wrappers, and configuration:
+Removal is automatic. Omarchy has no uninstall hook, so the plugin covers it from
+two sides:
+
+```sh
+omarchy plugin remove zamecki.antigravity
+```
+
+- **On disable or remove**, `Service.qml` sees the plugin flip to disabled as it
+  is destroyed and runs `uninstall.sh` for you. A shell restart does not trigger
+  this, because the plugin is still enabled at that point.
+- **On any other removal path** — a manual `rm -rf`, or a removal while the shell
+  is not running — each shim notices its wrapper is gone the next time it is
+  called: it deletes itself, clears a `defaults/agent` set to `antigravity`
+  (nothing could launch it any more), and hands the call to the packaged Omarchy
+  command. The leftover menu row's `when:` guard already hides it.
+
+To revert everything by hand at any time:
 
 ```sh
 ~/.config/omarchy/plugins/zamecki.antigravity/uninstall.sh
 ```
 
-To also delete the plugin folder itself:
-
-```sh
-rm -rf ~/.config/omarchy/plugins/zamecki.antigravity
-```
+This removes the menu row, the three shims (only if they still carry this
+plugin's marker), the usage state and cache files, and a `defaults/agent` set
+to `antigravity`. It is idempotent.
