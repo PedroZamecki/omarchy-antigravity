@@ -6,9 +6,10 @@
 
 Everything the agents panel shows for Antigravity comes from this one
 command: local transcript stats from ~/.gemini/antigravity-cli/brain,
-the summaries database and history fallbacks, and authoritative rate
-limits from the Google Cloud Code backend. The panel itself only ever
-reads the JSON this prints; it never talks to disk formats or endpoints.
+conversations databases across ~/.gemini, the summaries database and
+history fallbacks, and authoritative rate limits from the Google Cloud
+Code backend. The panel itself only ever reads the JSON this prints;
+it never talks to disk formats or endpoints.
 """
 
 from __future__ import annotations
@@ -60,8 +61,12 @@ OAUTH_CLIENTS = [
 OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 LOAD_CODE_ASSIST_URL = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
-LOAD_CODE_ASSIST_FALLBACK_URL = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
-RETRIEVE_USER_QUOTA_SUMMARY_URL = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+LOAD_CODE_ASSIST_FALLBACK_URL = (
+    "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
+)
+RETRIEVE_USER_QUOTA_SUMMARY_URL = (
+    "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+)
 
 KEYRING_TOKEN_SERVICE = "gemini"
 KEYRING_TOKEN_USERNAME = "antigravity"
@@ -70,23 +75,45 @@ FALLBACK_TIER = "Antigravity"
 
 
 def cache_root() -> Path:
-    root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omarchy" / "agent-usage"
+    root = (
+        Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+        / "omarchy"
+        / "agent-usage"
+    )
     root.mkdir(parents=True, exist_ok=True)
     return root
 
 
 def usage_dir() -> Path:
-    root = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "omarchy" / "agents" / "usage"
+    root = (
+        Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+        / "omarchy"
+        / "agents"
+        / "usage"
+    )
     root.mkdir(parents=True, exist_ok=True)
     return root
 
 
 def app_data_dir() -> Path:
-    return Path(os.environ.get("ANTIGRAVITY_APP_DATA_DIR") or (Path.home() / ".gemini" / "antigravity-cli"))
+    return Path(
+        os.environ.get("ANTIGRAVITY_APP_DATA_DIR")
+        or (Path.home() / ".gemini" / "antigravity-cli")
+    )
 
 
 def config_path() -> Path:
     return Path.home() / ".config" / "omarchy" / "agents" / "antigravity.json"
+
+
+def provider_id() -> str:
+    plugin_dir = Path(__file__).resolve().parents[1]
+    svg_stem = plugin_dir / "assets" / "antigravity"
+    # Omarchy Panel.qml resolves Qt.resolvedUrl("assets/" + p.providerId + ".svg")
+    # relative to /usr/share/omarchy/shell/plugins/agents/.
+    # Walking 7 levels up reaches filesystem root, allowing user assets to resolve
+    # seamlessly without root permissions or modifying /usr/share/.
+    return "../../../../../../../" + str(svg_stem).lstrip("/")
 
 
 def local_date_string() -> str:
@@ -95,7 +122,9 @@ def local_date_string() -> str:
 
 def recent_date_strings() -> list[str]:
     today = dt.datetime.now().astimezone().date()
-    return [(today - dt.timedelta(days=offset)).isoformat() for offset in range(6, -1, -1)]
+    return [
+        (today - dt.timedelta(days=offset)).isoformat() for offset in range(6, -1, -1)
+    ]
 
 
 def local_date_from_timestamp(value: Any) -> str:
@@ -103,7 +132,9 @@ def local_date_from_timestamp(value: Any) -> str:
         return local_date_string()
     if isinstance(value, (int, float)):
         try:
-            seconds = float(value) / 1000.0 if float(value) > 10_000_000_000 else float(value)
+            seconds = (
+                float(value) / 1000.0 if float(value) > 10_000_000_000 else float(value)
+            )
             return dt.datetime.fromtimestamp(seconds).astimezone().date().isoformat()
         except Exception:
             return local_date_string()
@@ -180,11 +211,15 @@ def read_fresh_json(path: Path, max_age_seconds: float) -> dict[str, Any] | None
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
-    handle_fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    handle_fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=path.name + ".", suffix=".tmp"
+    )
     tmp = Path(tmp_name)
     try:
         with os.fdopen(handle_fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n")
+            handle.write(
+                json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n"
+            )
         tmp.chmod(0o644)
         tmp.replace(path)
     except BaseException:
@@ -197,8 +232,13 @@ def normalize_model_id(raw_name: str) -> str:
         return "gemini-3.7-flash"
     s = raw_name.lower().strip()
     s = re.sub(r"\(.*?\)", "", s).strip()
+    s = re.sub(r"-(control|high|low|default)$", "", s)
     s = re.sub(r"[^a-z0-9.]+", "-", s).strip("-")
-    if not s.startswith("gemini") and not s.startswith("claude") and not s.startswith("gpt"):
+    if (
+        not s.startswith("gemini")
+        and not s.startswith("claude")
+        and not s.startswith("gpt")
+    ):
         s = "gemini-" + s
     return s
 
@@ -217,6 +257,93 @@ def parse_db_datetime(value: str) -> dt.datetime | None:
     if when.year < 2000:
         return None
     return when
+
+
+def parse_proto_fields(data: bytes) -> list[tuple[int, int, Any]]:
+    pos = 0
+    fields = []
+    length_data = len(data)
+    while pos < length_data:
+        tag = 0
+        shift = 0
+        while True:
+            if pos >= length_data:
+                return fields
+            b = data[pos]
+            pos += 1
+            tag |= (b & 0x7F) << shift
+            if not (b & 0x80):
+                break
+            shift += 7
+            if shift > 64:
+                return fields
+        field_num = tag >> 3
+        wire_type = tag & 0x7
+        if wire_type == 0:  # varint
+            val = 0
+            shift = 0
+            while True:
+                if pos >= length_data:
+                    break
+                b = data[pos]
+                pos += 1
+                val |= (b & 0x7F) << shift
+                if not (b & 0x80):
+                    break
+                shift += 7
+                if shift > 64:
+                    break
+            fields.append((field_num, wire_type, val))
+        elif wire_type == 1:  # 64-bit
+            val = data[pos : pos + 8]
+            pos += 8
+            fields.append((field_num, wire_type, val))
+        elif wire_type == 2:  # length-delimited
+            length = 0
+            shift = 0
+            while True:
+                if pos >= length_data:
+                    break
+                b = data[pos]
+                pos += 1
+                length |= (b & 0x7F) << shift
+                if not (b & 0x80):
+                    break
+                shift += 7
+                if shift > 64:
+                    break
+            if length < 0 or pos + length > length_data:
+                break
+            val = data[pos : pos + length]
+            pos += length
+            fields.append((field_num, wire_type, val))
+        elif wire_type == 5:  # 32-bit
+            val = data[pos : pos + 4]
+            pos += 4
+            fields.append((field_num, wire_type, val))
+        else:
+            break
+    return fields
+
+
+def candidate_app_dirs(primary_dir: Path) -> list[Path]:
+    dirs = [
+        primary_dir,
+        Path.home() / ".gemini" / "antigravity-acp",
+        Path.home() / ".gemini" / "antigravity",
+        Path.home() / ".gemini" / "antigravity-cli",
+    ]
+    seen: set[str] = set()
+    result = []
+    for d in dirs:
+        try:
+            resolved = str(d.resolve())
+        except Exception:
+            resolved = str(d)
+        if resolved not in seen and d.is_dir():
+            seen.add(resolved)
+            result.append(d)
+    return result
 
 
 # ---------------------------------------------------------------- local scan
@@ -238,129 +365,288 @@ def scan_local_usage(app_dir: Path) -> dict[str, Any]:
     today_prompts = 0
     today_total_tokens = 0
 
-    # 1. Scan conversation transcripts
-    brain_dir = app_dir / "brain"
-    if brain_dir.is_dir():
-        try:
-            for conv_dir in brain_dir.iterdir():
-                if not conv_dir.is_dir():
-                    continue
-                conv_name = conv_dir.name
-                transcript_path = conv_dir / ".system_generated" / "logs" / "transcript.jsonl"
-                if not transcript_path.is_file():
-                    transcript_path = conv_dir / "transcript.jsonl"
-                if not transcript_path.is_file():
-                    continue
+    seen_cids: set[str] = set()
 
-                current_model = "gemini-3.7-flash"
-                try:
-                    with transcript_path.open("r", encoding="utf-8", errors="replace") as fh:
-                        for line in fh:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            try:
-                                step = json.loads(line)
-                            except Exception:
-                                continue
-
-                            content = str(step.get("content", ""))
-                            thinking = str(step.get("thinking", ""))
-                            tool_calls = step.get("tool_calls")
-                            created_at_str = step.get("created_at") or ""
-                            step_type = step.get("type", "")
-
-                            step_date_str = local_date_from_timestamp(created_at_str)
-
-                            if "Model Selection" in content:
-                                m = re.search(r"Model Selection\` from .*? to (.+?)\.\s*(?:No need|\Z)", content)
-                                if m:
-                                    current_model = normalize_model_id(m.group(1))
-
-                            input_tokens = 0
-                            output_tokens = 0
-
-                            if step_type == "USER_INPUT":
-                                total_prompts += 1
-                                input_tokens += max(1, len(content) // 4)
-                                if step_date_str == today_str:
-                                    today_prompts += 1
-                            elif step_type in ("PLANNER_RESPONSE", "GENERIC"):
-                                output_tokens += len(content) // 4
-                                if thinking:
-                                    output_tokens += len(thinking) // 4
-                                if tool_calls:
-                                    try:
-                                        output_tokens += len(json.dumps(tool_calls)) // 4
-                                    except Exception:
-                                        pass
-                            elif step_type == "CHECKPOINT":
-                                input_tokens += len(content) // 4
-
-                            total_step_tokens = input_tokens + output_tokens
-                            if total_step_tokens > 0 or step_type == "USER_INPUT":
-                                active_dates.add(step_date_str)
-                                total_sessions.add(conv_name)
-
-                                bucket = model_usage.setdefault(current_model, empty_bucket())
-                                bucket["inputTokens"] += input_tokens
-                                bucket["outputTokens"] += output_tokens
-
-                                if step_date_str in recent:
-                                    recent[step_date_str]["messageCount"] += total_step_tokens
-
-                                if step_date_str == today_str:
-                                    today_sessions.add(conv_name)
-                                    today_total_tokens += total_step_tokens
-                                    today_tokens_by_model[current_model] = (
-                                        today_tokens_by_model.get(current_model, 0) + total_step_tokens
-                                    )
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    # 2. Read conversation summaries database for any additional sessions
-    summaries_db = app_dir / "conversation_summaries.db"
-    if summaries_db.is_file():
-        try:
-            conn = sqlite3.connect("file:" + str(summaries_db.resolve()) + "?mode=ro", uri=True, timeout=5)
-            conn.execute("PRAGMA query_only = ON")
-            rows = conn.execute(
-                "SELECT conversation_id, last_user_input_time, last_modified_time FROM conversation_summaries"
-            ).fetchall()
-            conn.close()
-            for cid, luit, lmt in rows:
-                when = parse_db_datetime(str(luit or "")) or parse_db_datetime(str(lmt or ""))
-                if when is None:
-                    continue
-                day_str = when.date().isoformat()
-                active_dates.add(day_str)
-                total_sessions.add(cid or str(when))
-                if day_str == today_str and cid:
-                    today_sessions.add(cid)
-        except Exception:
-            pass
-
-    # 3. Read history.jsonl for prompt history fallback
-    history_file = app_dir / "history.jsonl"
-    if history_file.is_file():
-        try:
-            with history_file.open("r", encoding="utf-8", errors="replace") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
+    for search_dir in candidate_app_dirs(app_dir):
+        # 1. Scan SQLite conversations (modern Antigravity and ACP)
+        conv_dir = search_dir / "conversations"
+        if conv_dir.is_dir():
+            try:
+                for db_path in conv_dir.glob("*.db"):
+                    cid = db_path.stem
+                    if cid in seen_cids:
                         continue
+                    seen_cids.add(cid)
+                    total_sessions.add(cid)
+
                     try:
-                        item = json.loads(line)
-                        ts = item.get("timestamp")
-                        if ts:
-                            day_str = local_date_from_timestamp(ts)
-                            active_dates.add(day_str)
+                        conn = sqlite3.connect(
+                            f"file:{db_path.resolve()}?mode=ro", uri=True, timeout=5
+                        )
+                        conn.execute("PRAGMA query_only = ON")
+                        c = conn.cursor()
+
+                        db_dates: set[str] = set()
+
+                        # Step rows for prompts and dates
+                        step_rows = c.execute(
+                            "SELECT idx, step_type, metadata FROM steps"
+                        ).fetchall()
+                        for s_idx, s_type, s_meta in step_rows:
+                            if s_type == 14:  # USER_INPUT
+                                total_prompts += 1
+                            if s_meta:
+                                fields = parse_proto_fields(s_meta)
+                                for fnum, wtype, val in fields:
+                                    if fnum == 1 and wtype == 2:
+                                        t_fields = parse_proto_fields(val)
+                                        for tf, tw, tv in t_fields:
+                                            if (
+                                                tf == 1
+                                                and tw == 0
+                                                and tv > 1_000_000_000
+                                            ):
+                                                s_dt = dt.datetime.fromtimestamp(
+                                                    tv
+                                                ).astimezone()
+                                                s_date = s_dt.date().isoformat()
+                                                db_dates.add(s_date)
+                                                active_dates.add(s_date)
+                                                if s_type == 14 and s_date == today_str:
+                                                    today_prompts += 1
+
+                        if today_str in db_dates:
+                            today_sessions.add(cid)
+
+                        # Generation metadata for tokens and models
+                        gen_rows = c.execute(
+                            "SELECT idx, data FROM gen_metadata"
+                        ).fetchall()
+                        for g_idx, g_data in gen_rows:
+                            fields = parse_proto_fields(g_data)
+                            for fnum, wtype, val in fields:
+                                if fnum == 1 and wtype == 2:
+                                    subfields = parse_proto_fields(val)
+                                    model_name = "gemini-3.7-flash"
+                                    tokens = {}
+                                    ts_val = None
+                                    for sfnum, swtype, sval in subfields:
+                                        if sfnum == 19 and swtype == 2:
+                                            try:
+                                                model_name = sval.decode(
+                                                    "utf-8", errors="ignore"
+                                                )
+                                            except Exception:
+                                                pass
+                                        elif sfnum == 4 and swtype == 2:
+                                            tf = parse_proto_fields(sval)
+                                            tokens = {
+                                                tfnum: tval
+                                                for tfnum, tw, tval in tf
+                                                if tw == 0
+                                            }
+                                        elif sfnum == 9 and swtype == 2:
+                                            for tsf, tsw, tsval in parse_proto_fields(
+                                                sval
+                                            ):
+                                                if tsf == 4 and tsw == 2:
+                                                    for (
+                                                        tf_n,
+                                                        tf_w,
+                                                        tf_v,
+                                                    ) in parse_proto_fields(tsval):
+                                                        if (
+                                                            tf_n == 1
+                                                            and tf_w == 0
+                                                            and tf_v > 1_000_000_000
+                                                        ):
+                                                            ts_val = tf_v
+
+                                    norm_model = normalize_model_id(model_name)
+                                    in_tok = tokens.get(2, 0)
+                                    out_tok = tokens.get(3, 0)
+                                    cache_read = tokens.get(9, 0)
+                                    cache_write = tokens.get(10, 0)
+                                    turn_total = (
+                                        in_tok + out_tok + cache_read + cache_write
+                                    )
+
+                                    bucket = model_usage.setdefault(
+                                        norm_model, empty_bucket()
+                                    )
+                                    bucket["inputTokens"] += in_tok
+                                    bucket["outputTokens"] += out_tok
+                                    bucket["cacheReadInputTokens"] += cache_read
+                                    bucket["cacheCreationInputTokens"] += cache_write
+
+                                    if ts_val:
+                                        turn_dt = dt.datetime.fromtimestamp(
+                                            ts_val
+                                        ).astimezone()
+                                        turn_date = turn_dt.date().isoformat()
+                                        if turn_date in recent:
+                                            recent[turn_date]["messageCount"] += (
+                                                turn_total
+                                            )
+                                        if turn_date == today_str:
+                                            today_total_tokens += turn_total
+                                            today_tokens_by_model[norm_model] = (
+                                                today_tokens_by_model.get(norm_model, 0)
+                                                + turn_total
+                                            )
+                        conn.close()
                     except Exception:
                         pass
-        except Exception:
-            pass
+            except Exception:
+                pass
+
+        # 2. Legacy transcript.jsonl scanner
+        brain_dir = search_dir / "brain"
+        if brain_dir.is_dir():
+            try:
+                for conv_dir in brain_dir.iterdir():
+                    if not conv_dir.is_dir():
+                        continue
+                    conv_name = conv_dir.name
+                    if conv_name in seen_cids:
+                        continue
+                    transcript_path = (
+                        conv_dir / ".system_generated" / "logs" / "transcript.jsonl"
+                    )
+                    if not transcript_path.is_file():
+                        transcript_path = conv_dir / "transcript.jsonl"
+                    if not transcript_path.is_file():
+                        continue
+
+                    current_model = "gemini-3.7-flash"
+                    try:
+                        with transcript_path.open(
+                            "r", encoding="utf-8", errors="replace"
+                        ) as fh:
+                            for line in fh:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                try:
+                                    step = json.loads(line)
+                                except Exception:
+                                    continue
+
+                                content = str(step.get("content", ""))
+                                thinking = str(step.get("thinking", ""))
+                                tool_calls = step.get("tool_calls")
+                                created_at_str = step.get("created_at") or ""
+                                step_type = step.get("type", "")
+
+                                step_date_str = local_date_from_timestamp(
+                                    created_at_str
+                                )
+
+                                if "Model Selection" in content:
+                                    m = re.search(
+                                        r"Model Selection\` from .*? to (.+?)\.\s*(?:No need|\Z)",
+                                        content,
+                                    )
+                                    if m:
+                                        current_model = normalize_model_id(m.group(1))
+
+                                input_tokens = 0
+                                output_tokens = 0
+
+                                if step_type == "USER_INPUT":
+                                    total_prompts += 1
+                                    input_tokens += max(1, len(content) // 4)
+                                    if step_date_str == today_str:
+                                        today_prompts += 1
+                                elif step_type in ("PLANNER_RESPONSE", "GENERIC"):
+                                    output_tokens += len(content) // 4
+                                    if thinking:
+                                        output_tokens += len(thinking) // 4
+                                    if tool_calls:
+                                        try:
+                                            output_tokens += (
+                                                len(json.dumps(tool_calls)) // 4
+                                            )
+                                        except Exception:
+                                            pass
+                                elif step_type == "CHECKPOINT":
+                                    input_tokens += len(content) // 4
+
+                                total_step_tokens = input_tokens + output_tokens
+                                if total_step_tokens > 0 or step_type == "USER_INPUT":
+                                    active_dates.add(step_date_str)
+                                    total_sessions.add(conv_name)
+
+                                    bucket = model_usage.setdefault(
+                                        current_model, empty_bucket()
+                                    )
+                                    bucket["inputTokens"] += input_tokens
+                                    bucket["outputTokens"] += output_tokens
+
+                                    if step_date_str in recent:
+                                        recent[step_date_str]["messageCount"] += (
+                                            total_step_tokens
+                                        )
+
+                                    if step_date_str == today_str:
+                                        today_sessions.add(conv_name)
+                                        today_total_tokens += total_step_tokens
+                                        today_tokens_by_model[current_model] = (
+                                            today_tokens_by_model.get(current_model, 0)
+                                            + total_step_tokens
+                                        )
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        # 3. Read conversation summaries database for any additional sessions
+        summaries_db = search_dir / "conversation_summaries.db"
+        if summaries_db.is_file():
+            try:
+                conn = sqlite3.connect(
+                    "file:" + str(summaries_db.resolve()) + "?mode=ro",
+                    uri=True,
+                    timeout=5,
+                )
+                conn.execute("PRAGMA query_only = ON")
+                rows = conn.execute(
+                    "SELECT conversation_id, last_user_input_time, last_modified_time FROM conversation_summaries"
+                ).fetchall()
+                conn.close()
+                for cid, luit, lmt in rows:
+                    when = parse_db_datetime(str(luit or "")) or parse_db_datetime(
+                        str(lmt or "")
+                    )
+                    if when is None:
+                        continue
+                    day_str = when.date().isoformat()
+                    active_dates.add(day_str)
+                    total_sessions.add(cid or str(when))
+                    if day_str == today_str and cid:
+                        today_sessions.add(cid)
+            except Exception:
+                pass
+
+        # 4. Read history.jsonl for prompt history fallback
+        history_file = search_dir / "history.jsonl"
+        if history_file.is_file():
+            try:
+                with history_file.open("r", encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            item = json.loads(line)
+                            ts = item.get("timestamp")
+                            if ts:
+                                day_str = local_date_from_timestamp(ts)
+                                active_dates.add(day_str)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
     stats["totalSessions"] = len(total_sessions)
     stats["todaySessions"] = len(today_sessions)
@@ -379,7 +665,10 @@ def scan_local_usage(app_dir: Path) -> dict[str, Any]:
 def scan_cache_paths(app_dir: Path) -> tuple[Path, Path]:
     digest = hashlib.sha1(str(app_dir).encode("utf-8")).hexdigest()[:16]
     root = cache_root()
-    return root / f"antigravity-scan-{digest}.json", root / f"antigravity-scan-{digest}.lock"
+    return (
+        root / f"antigravity-scan-{digest}.json",
+        root / f"antigravity-scan-{digest}.lock",
+    )
 
 
 def cached_scan(app_dir: Path, max_age_seconds: float) -> dict[str, Any]:
@@ -406,7 +695,14 @@ def read_keyring_token() -> tuple[dict[str, Any] | None, str]:
     """Reads stored OAuth token JSON from secret-tool."""
     try:
         out = subprocess.run(
-            ["secret-tool", "lookup", "service", KEYRING_TOKEN_SERVICE, "username", KEYRING_TOKEN_USERNAME],
+            [
+                "secret-tool",
+                "lookup",
+                "service",
+                KEYRING_TOKEN_SERVICE,
+                "username",
+                KEYRING_TOKEN_USERNAME,
+            ],
             capture_output=True,
             text=True,
             timeout=10,
@@ -444,7 +740,9 @@ def token_is_valid(token: dict[str, Any]) -> bool:
 
 
 class RefreshResult:
-    def __init__(self, access_token: str | None, error_type: str = "", error_code: int = 0):
+    def __init__(
+        self, access_token: str | None, error_type: str = "", error_code: int = 0
+    ):
         self.access_token = access_token
         # error_type: "invalid_grant", "transport", "http_error", ""
         self.error_type = error_type
@@ -459,12 +757,14 @@ def refresh_oauth_token(refresh_token: str) -> RefreshResult:
     last_error_code = 0
 
     for client_id, client_secret in OAUTH_CLIENTS:
-        payload = urllib.parse.urlencode({
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "refresh_token": refresh_token,
-            "grant_type": "refresh_token",
-        }).encode("utf-8")
+        payload = urllib.parse.urlencode(
+            {
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+            }
+        ).encode("utf-8")
         req = urllib.request.Request(
             OAUTH_TOKEN_URL,
             data=payload,
@@ -516,7 +816,9 @@ class BackendResult:
         self.retry_after = retry_after
 
 
-def post_json(url: str, payload_dict: dict[str, Any], access_token: str, timeout: int = 8) -> tuple[dict[str, Any] | None, BackendResult | None]:
+def post_json(
+    url: str, payload_dict: dict[str, Any], access_token: str, timeout: int = 8
+) -> tuple[dict[str, Any] | None, BackendResult | None]:
     payload_bytes = json.dumps(payload_dict).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -535,9 +837,16 @@ def post_json(url: str, payload_dict: dict[str, Any], access_token: str, timeout
     except urllib.error.HTTPError as error:
         retry_after = error.headers.get("retry-after", "") if error.headers else ""
         if error.code in (401, 403):
-            return None, BackendResult(ok=False, error_type="unauthenticated", http_code=error.code)
+            return None, BackendResult(
+                ok=False, error_type="unauthenticated", http_code=error.code
+            )
         if error.code == 429:
-            return None, BackendResult(ok=False, error_type="rate_limited", http_code=error.code, retry_after=retry_after)
+            return None, BackendResult(
+                ok=False,
+                error_type="rate_limited",
+                http_code=error.code,
+                retry_after=retry_after,
+            )
         return None, BackendResult(
             ok=False,
             error_type="http_error",
@@ -607,16 +916,20 @@ def parse_quota_limits(quota_summary: dict[str, Any] | None) -> list[dict[str, A
                 # When no quota has been consumed yet (0% used / 100% remaining), the window has
                 # not started ticking down, so suppress the placeholder reset timestamp.
                 # Once the user begins consuming quota (> 0% used), the authoritative reset timestamp is shown.
-                reset_time = str(bucket.get("resetTime") or "") if used_pct > 0.0 else ""
+                reset_time = (
+                    str(bucket.get("resetTime") or "") if used_pct > 0.0 else ""
+                )
                 title = format_bucket_title(group_name, bucket)
                 label = bucket.get("displayName") or f"{title} Limit Remaining"
 
-                limits.append({
-                    "title": title,
-                    "label": label,
-                    "percent": round(used_pct, 4),
-                    "resetsAt": reset_time,
-                })
+                limits.append(
+                    {
+                        "title": title,
+                        "label": label,
+                        "percent": round(used_pct, 4),
+                        "resetsAt": reset_time,
+                    }
+                )
     return limits
 
 
@@ -667,10 +980,14 @@ def probe_antigravity_backend(access_token: str) -> BackendResult:
     if not quota_data:
         if quota_err and quota_err.error_type == "unauthenticated":
             return quota_err
-        return BackendResult(ok=True, tier_label=tier_name, project_id=project_id, limits=[])
+        return BackendResult(
+            ok=True, tier_label=tier_name, project_id=project_id, limits=[]
+        )
 
     limits = parse_quota_limits(quota_data)
-    return BackendResult(ok=True, tier_label=tier_name, project_id=project_id, limits=limits)
+    return BackendResult(
+        ok=True, tier_label=tier_name, project_id=project_id, limits=limits
+    )
 
 
 def limit_window_open(entry: dict[str, Any], now: dt.datetime) -> bool:
@@ -691,7 +1008,11 @@ def usable_cached_limits(cached: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(entries, list):
         return []
     now = dt.datetime.now(dt.timezone.utc)
-    return [entry for entry in entries if isinstance(entry, dict) and limit_window_open(entry, now)]
+    return [
+        entry
+        for entry in entries
+        if isinstance(entry, dict) and limit_window_open(entry, now)
+    ]
 
 
 def collect_limits(force: bool) -> dict[str, Any]:
@@ -769,7 +1090,12 @@ def collect_limits(force: bool) -> dict[str, Any]:
 
     # 3. Probe cache freshness window
     fetched_at = number(cached.get("fetchedAtMs")) / 1000.0
-    if fallback and not force and not refreshed and (time.time() - fetched_at < PROBE_MIN_INTERVAL_SECONDS):
+    if (
+        fallback
+        and not force
+        and not refreshed
+        and (time.time() - fetched_at < PROBE_MIN_INTERVAL_SECONDS)
+    ):
         result["limits"] = fallback
         result["tierLabel"] = cached_tier or declared_plan() or FALLBACK_TIER
         result["usageStatusText"] = ""
@@ -780,7 +1106,12 @@ def collect_limits(force: bool) -> dict[str, Any]:
     probe = probe_antigravity_backend(access_token)
 
     # If backend returned 401 Unauthorized, token may have expired server-side: refresh once
-    if not probe.ok and probe.error_type == "unauthenticated" and not refreshed and refresh_token:
+    if (
+        not probe.ok
+        and probe.error_type == "unauthenticated"
+        and not refreshed
+        and refresh_token
+    ):
         refresh_res = refresh_oauth_token(refresh_token)
         if refresh_res.access_token:
             access_token = refresh_res.access_token
@@ -793,12 +1124,15 @@ def collect_limits(force: bool) -> dict[str, Any]:
         result["tierLabel"] = tier
         result["usageStatusText"] = ""
         result["authHelpText"] = ""
-        write_json(probe_cache, {
-            "fetchedAtMs": round(time.time() * 1000),
-            "tierLabel": tier,
-            "projectId": probe.project_id,
-            "limits": probe.limits or [],
-        })
+        write_json(
+            probe_cache,
+            {
+                "fetchedAtMs": round(time.time() * 1000),
+                "tierLabel": tier,
+                "projectId": probe.project_id,
+                "limits": probe.limits or [],
+            },
+        )
         return result
 
     # 5. Handle probe failures
@@ -822,7 +1156,9 @@ def collect_limits(force: bool) -> dict[str, Any]:
     else:
         result["usageStatusText"] = "Antigravity limits unavailable"
         if probe.error_type == "rate_limited":
-            retry_text = f" (retry after {probe.retry_after}s)" if probe.retry_after else ""
+            retry_text = (
+                f" (retry after {probe.retry_after}s)" if probe.retry_after else ""
+            )
             result["authHelpText"] = (
                 f"Google Cloud Code backend is rate limiting checks right now{retry_text}. "
                 "Local Antigravity stats are still shown."
@@ -833,7 +1169,8 @@ def collect_limits(force: bool) -> dict[str, Any]:
             )
         else:
             result["authHelpText"] = (
-                probe.help_text or "Google Cloud Code backend returned an error. Local Antigravity stats are still shown."
+                probe.help_text
+                or "Google Cloud Code backend returned an error. Local Antigravity stats are still shown."
             )
 
     return result
@@ -845,7 +1182,9 @@ def collect_limits(force: bool) -> dict[str, Any]:
 def write_record(record: dict[str, Any]) -> None:
     target_dir = usage_dir()
     record_path = target_dir / f"{AGENT_ID}.json"
-    handle_fd, tmp_name = tempfile.mkstemp(dir=target_dir, prefix=f".{AGENT_ID}.", suffix=".tmp")
+    handle_fd, tmp_name = tempfile.mkstemp(
+        dir=target_dir, prefix=f".{AGENT_ID}.", suffix=".tmp"
+    )
     tmp = Path(tmp_name)
     try:
         with os.fdopen(handle_fd, "w", encoding="utf-8") as fh:
@@ -859,25 +1198,39 @@ def write_record(record: dict[str, Any]) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Print the Antigravity usage record as JSON")
-    parser.add_argument("--force", action="store_true", help="rescan transcripts and re-probe limits, ignoring caches")
+    parser = argparse.ArgumentParser(
+        description="Print the Antigravity usage record as JSON"
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="rescan transcripts and re-probe limits, ignoring caches",
+    )
     parser.add_argument(
         "--limits-only",
         action="store_true",
         help="reuse any recent transcript scan; only the limits probe must be fresh",
     )
     parser.add_argument("--cache-seconds", type=float, default=SCAN_REUSE_SECONDS)
-    parser.add_argument("--write", action="store_true", help="also write the record to agents usage state directory")
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help="also write the record to agents usage state directory",
+    )
     args = parser.parse_args()
 
     app_dir = app_data_dir()
-    scan_age = 0 if args.force else (LIMITS_ONLY_REUSE_SECONDS if args.limits_only else args.cache_seconds)
+    scan_age = (
+        0
+        if args.force
+        else (LIMITS_ONLY_REUSE_SECONDS if args.limits_only else args.cache_seconds)
+    )
     stats = cached_scan(app_dir, scan_age)
     limits = collect_limits(args.force)
 
     record = {
         "schemaVersion": 1,
-        "id": AGENT_ID,
+        "id": provider_id(),
         "name": AGENT_NAME,
         "icon": "\ue908",
         "iconFont": "omarchy-antigravity",
