@@ -54,7 +54,7 @@ if omarchy-cmd-missing agy; then
 fi
 
 command=(agy --dangerously-skip-permissions)
-[[ -n ${prompt:-} ]] && command=(-p "$prompt")
+[[ -n ${prompt:-} ]] && command+=(--prompt-interactive "$prompt")
 
 if [[ $inline == "true" ]]; then
   "${command[@]}"
