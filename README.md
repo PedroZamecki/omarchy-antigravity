@@ -26,6 +26,7 @@ Omarchy agent option, alongside the agents shipped by `omarchy.agents`.
     <img src="assets/default_agent_selection.png" alt="Omarchy Default Agent Menu" height="300" />
     <img src="assets/auto_agent_install_default_agent.png" alt="On-demand Installation via Aqua" height="300" />
   </p>
+
 - **Agent launch** — the bar's agent icon / `omarchy agent` flow launches `agy`
   when Antigravity is the default agent (with `--dangerously-skip-permissions`,
   or `agy -p "<prompt>"` for a one-shot prompt).
@@ -63,7 +64,7 @@ When it is absent, the neutral label `Antigravity` is used.
 ## Install
 
 ```sh
-omarchy plugin enable zamecki.antigravity
+omarchy plugin add https://github.com/PedroZamecki/omarchy-antigravity --enable
 ```
 
 Enabling is all that is needed: the service runs `install.sh` itself on load.
