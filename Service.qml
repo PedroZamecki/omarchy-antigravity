@@ -14,6 +14,8 @@ Item {
   readonly property string pluginDir: manifest && manifest.__sourceDir ? manifest.__sourceDir : (home + "/.config/omarchy/plugins/zamecki.antigravity")
   readonly property string collectorPath: pluginDir + "/bin/omarchy-agent-usage-antigravity"
   readonly property string historyFile: home + "/.gemini/antigravity-cli/history.jsonl"
+  readonly property string cliConversationsDir: home + "/.gemini/antigravity-cli/conversations"
+  readonly property string acpConversationsDir: home + "/.gemini/antigravity-acp/conversations"
 
   readonly property int refreshIntervalSec: 60
 
@@ -74,10 +76,26 @@ Item {
     onFileChanged: root.runCollector(true)
   }
 
-  // 2. React immediately when the user interacts with agy (prompts, answers, auth)
+  // 2. React immediately when the user interacts with agy or ACP (prompts, answers, auth, conversations)
   FileView {
     id: agyHistoryWatch
     path: root.historyFile
+    watchChanges: true
+    printErrors: false
+    onFileChanged: debounceTimer.restart()
+  }
+
+  FileView {
+    id: cliConversationsWatch
+    path: root.cliConversationsDir
+    watchChanges: true
+    printErrors: false
+    onFileChanged: debounceTimer.restart()
+  }
+
+  FileView {
+    id: acpConversationsWatch
+    path: root.acpConversationsDir
     watchChanges: true
     printErrors: false
     onFileChanged: debounceTimer.restart()

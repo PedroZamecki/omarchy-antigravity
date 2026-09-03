@@ -387,6 +387,7 @@ def scan_local_usage(app_dir: Path) -> dict[str, Any]:
                         c = conn.cursor()
 
                         db_dates: set[str] = set()
+                        step_timestamps: dict[int, int] = {}
 
                         # Step rows for prompts and dates
                         step_rows = c.execute(
@@ -406,6 +407,7 @@ def scan_local_usage(app_dir: Path) -> dict[str, Any]:
                                                 and tw == 0
                                                 and tv > 1_000_000_000
                                             ):
+                                                step_timestamps[s_idx] = tv
                                                 s_dt = dt.datetime.fromtimestamp(
                                                     tv
                                                 ).astimezone()
@@ -430,6 +432,7 @@ def scan_local_usage(app_dir: Path) -> dict[str, Any]:
                                     model_name = "gemini-3.7-flash"
                                     tokens = {}
                                     ts_val = None
+                                    last_step = None
                                     for sfnum, swtype, sval in subfields:
                                         if sfnum == 19 and swtype == 2:
                                             try:
@@ -461,6 +464,28 @@ def scan_local_usage(app_dir: Path) -> dict[str, Any]:
                                                             and tf_v > 1_000_000_000
                                                         ):
                                                             ts_val = tf_v
+                                        elif sfnum == 20 and swtype == 2:
+                                            k, v = None, None
+                                            for ssfn, sswt, ssval in parse_proto_fields(sval):
+                                                if ssfn == 1 and sswt == 2:
+                                                    k = ssval.decode("utf-8", errors="ignore")
+                                                elif ssfn == 2 and sswt == 2:
+                                                    v = ssval.decode("utf-8", errors="ignore")
+                                            if k == "last_step_index" and v and v.isdigit():
+                                                last_step = int(v)
+
+                                    if not ts_val:
+                                        if last_step is not None and last_step in step_timestamps:
+                                            ts_val = step_timestamps[last_step]
+                                        elif g_idx in step_timestamps:
+                                            ts_val = step_timestamps[g_idx]
+                                        elif step_timestamps:
+                                            ts_val = step_timestamps[max(step_timestamps.keys())]
+                                        else:
+                                            try:
+                                                ts_val = int(db_path.stat().st_mtime)
+                                            except Exception:
+                                                pass
 
                                     norm_model = normalize_model_id(model_name)
                                     in_tok = tokens.get(2, 0)
@@ -673,18 +698,27 @@ def scan_cache_paths(app_dir: Path) -> tuple[Path, Path]:
 
 def cached_scan(app_dir: Path, max_age_seconds: float) -> dict[str, Any]:
     cache_file, lock_file = scan_cache_paths(app_dir)
+    today = local_date_string()
 
     cached = read_fresh_json(cache_file, max_age_seconds)
-    if cached is not None and isinstance(cached.get("stats"), dict):
+    if (
+        cached is not None
+        and isinstance(cached.get("stats"), dict)
+        and cached.get("scanDate") == today
+    ):
         return cached["stats"]
 
     with lock_file.open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         cached = read_fresh_json(cache_file, max_age_seconds)
-        if cached is not None and isinstance(cached.get("stats"), dict):
+        if (
+            cached is not None
+            and isinstance(cached.get("stats"), dict)
+            and cached.get("scanDate") == today
+        ):
             return cached["stats"]
         summary = scan_local_usage(app_dir)
-        write_json(cache_file, {"stats": summary, "scanDate": local_date_string()})
+        write_json(cache_file, {"stats": summary, "scanDate": today})
         return summary
 
 
