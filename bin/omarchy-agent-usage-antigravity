@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -60,13 +61,10 @@ OAUTH_CLIENTS = [
 ]
 OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
-LOAD_CODE_ASSIST_URL = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
-LOAD_CODE_ASSIST_FALLBACK_URL = (
-    "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
-)
-RETRIEVE_USER_QUOTA_SUMMARY_URL = (
-    "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
-)
+CODE_ASSIST_HOSTS = [
+    "https://daily-cloudcode-pa.googleapis.com",
+    "https://cloudcode-pa.googleapis.com",
+]
 
 KEYRING_TOKEN_SERVICE = "gemini"
 KEYRING_TOKEN_USERNAME = "antigravity"
@@ -928,17 +926,24 @@ def parse_quota_limits(quota_summary: dict[str, Any] | None) -> list[dict[str, A
     if not quota_summary or not isinstance(quota_summary, dict):
         return []
 
+    if "command" in quota_summary and isinstance(quota_summary["command"], dict):
+        cmd_data = quota_summary["command"].get("data")
+        if isinstance(cmd_data, dict):
+            quota_summary = cmd_data
+
     limits = []
     groups = quota_summary.get("groups", [])
     if isinstance(groups, list):
         for group in groups:
             if not isinstance(group, dict):
                 continue
-            group_name = group.get("displayName", "")
+            group_name = group.get("displayName") or group.get("name") or ""
             for bucket in group.get("buckets", []):
                 if not isinstance(bucket, dict):
                     continue
                 rem_frac = bucket.get("remainingFraction")
+                if rem_frac is None:
+                    rem_frac = bucket.get("remaining_fraction")
                 if rem_frac is None:
                     continue
                 try:
@@ -950,11 +955,14 @@ def parse_quota_limits(quota_summary: dict[str, Any] | None) -> list[dict[str, A
                 # When no quota has been consumed yet (0% used / 100% remaining), the window has
                 # not started ticking down, so suppress the placeholder reset timestamp.
                 # Once the user begins consuming quota (> 0% used), the authoritative reset timestamp is shown.
-                reset_time = (
-                    str(bucket.get("resetTime") or "") if used_pct > 0.0 else ""
-                )
+                reset_raw = bucket.get("resetTime") or bucket.get("reset_time") or ""
+                reset_time = str(reset_raw) if used_pct > 0.0 else ""
                 title = format_bucket_title(group_name, bucket)
-                label = bucket.get("displayName") or f"{title} Limit Remaining"
+                label = (
+                    bucket.get("displayName")
+                    or bucket.get("name")
+                    or f"{title} Limit Remaining"
+                )
 
                 limits.append(
                     {
@@ -965,6 +973,40 @@ def parse_quota_limits(quota_summary: dict[str, Any] | None) -> list[dict[str, A
                     }
                 )
     return limits
+
+
+def find_antigravity_binary() -> str | None:
+    binary = shutil.which("antigravity")
+    if binary:
+        return binary
+    fallback = (
+        Path.home()
+        / ".local/share/mise/installs/aqua-google-antigravity-antigravity-cli/latest/antigravity"
+    )
+    if fallback.is_file() and os.access(fallback, os.X_OK):
+        return str(fallback)
+    return None
+
+
+def probe_antigravity_cli() -> BackendResult | None:
+    binary = find_antigravity_binary()
+    if not binary:
+        return None
+    try:
+        proc = subprocess.run(
+            [binary, "-p", "/quota", "--output-format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            raw_data = json.loads(proc.stdout)
+            limits = parse_quota_limits(raw_data)
+            if limits:
+                return BackendResult(ok=True, limits=limits)
+    except Exception:
+        pass
+    return None
 
 
 def parse_tier_from_account(data: dict[str, Any]) -> tuple[str, str]:
@@ -990,28 +1032,64 @@ def parse_tier_from_account(data: dict[str, Any]) -> tuple[str, str]:
 def probe_antigravity_backend(access_token: str) -> BackendResult:
     account_data = None
     account_err = None
-    for url in (LOAD_CODE_ASSIST_URL, LOAD_CODE_ASSIST_FALLBACK_URL):
-        account_data, account_err = post_json(url, {}, access_token, timeout=8)
+    successful_host = None
+    for host in CODE_ASSIST_HOSTS:
+        account_data, account_err = post_json(
+            f"{host}/v1internal:loadCodeAssist", {}, access_token, timeout=8
+        )
         if account_data:
+            successful_host = host
             break
         if account_err and account_err.error_type == "unauthenticated":
             return account_err
 
     if not account_data:
+        cli_res = probe_antigravity_cli()
+        if cli_res and cli_res.ok and cli_res.limits:
+            return cli_res
         return account_err or BackendResult(ok=False, error_type="http_error")
 
     tier_name, project_id = parse_tier_from_account(account_data)
 
     if not project_id:
+        cli_res = probe_antigravity_cli()
+        if cli_res and cli_res.ok and cli_res.limits:
+            return BackendResult(
+                ok=True,
+                tier_label=tier_name or cli_res.tier_label,
+                project_id="",
+                limits=cli_res.limits,
+            )
         return BackendResult(ok=True, tier_label=tier_name, project_id="", limits=[])
 
-    quota_data, quota_err = post_json(
-        RETRIEVE_USER_QUOTA_SUMMARY_URL,
-        {"project": project_id},
-        access_token,
-        timeout=8,
-    )
+    quota_data = None
+    quota_err = None
+    hosts_to_try = [successful_host] if successful_host else []
+    for h in CODE_ASSIST_HOSTS:
+        if h not in hosts_to_try:
+            hosts_to_try.append(h)
+
+    for host in hosts_to_try:
+        quota_data, quota_err = post_json(
+            f"{host}/v1internal:retrieveUserQuotaSummary",
+            {"project": project_id},
+            access_token,
+            timeout=8,
+        )
+        if quota_data:
+            break
+        if quota_err and quota_err.error_type == "unauthenticated":
+            return quota_err
+
     if not quota_data:
+        cli_res = probe_antigravity_cli()
+        if cli_res and cli_res.ok and cli_res.limits:
+            return BackendResult(
+                ok=True,
+                tier_label=tier_name or cli_res.tier_label,
+                project_id=project_id,
+                limits=cli_res.limits,
+            )
         if quota_err and quota_err.error_type == "unauthenticated":
             return quota_err
         return BackendResult(
@@ -1019,6 +1097,11 @@ def probe_antigravity_backend(access_token: str) -> BackendResult:
         )
 
     limits = parse_quota_limits(quota_data)
+    if not limits:
+        cli_res = probe_antigravity_cli()
+        if cli_res and cli_res.ok and cli_res.limits:
+            limits = cli_res.limits
+
     return BackendResult(
         ok=True, tier_label=tier_name, project_id=project_id, limits=limits
     )
@@ -1067,6 +1150,23 @@ def collect_limits(force: bool) -> dict[str, Any]:
 
     # 1. No account in keyring (never authenticated or signed out)
     if token_data is None or not isinstance(token_data, dict):
+        cli_result = probe_antigravity_cli()
+        if cli_result and cli_result.limits:
+            tier = declared_plan() or cached_tier or FALLBACK_TIER
+            result["limits"] = cli_result.limits
+            result["tierLabel"] = tier
+            result["usageStatusText"] = ""
+            result["authHelpText"] = ""
+            write_json(
+                probe_cache,
+                {
+                    "fetchedAtMs": round(time.time() * 1000),
+                    "tierLabel": tier,
+                    "projectId": "",
+                    "limits": cli_result.limits,
+                },
+            )
+            return result
         result["limits"] = fallback
         result["tierLabel"] = declared_plan() or cached_tier or FALLBACK_TIER
         result["usageStatusText"] = "Waiting for auth"
@@ -1170,6 +1270,24 @@ def collect_limits(force: bool) -> dict[str, Any]:
         return result
 
     # 5. Handle probe failures
+    cli_result = probe_antigravity_cli()
+    if cli_result and cli_result.limits:
+        tier = probe.tier_label or cached_tier or declared_plan() or FALLBACK_TIER
+        result["limits"] = cli_result.limits
+        result["tierLabel"] = tier
+        result["usageStatusText"] = ""
+        result["authHelpText"] = ""
+        write_json(
+            probe_cache,
+            {
+                "fetchedAtMs": round(time.time() * 1000),
+                "tierLabel": tier,
+                "projectId": probe.project_id if probe.ok else "",
+                "limits": cli_result.limits,
+            },
+        )
+        return result
+
     result["tierLabel"] = declared_plan() or cached_tier or FALLBACK_TIER
 
     if probe.error_type == "unauthenticated":
