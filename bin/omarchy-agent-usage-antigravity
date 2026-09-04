@@ -922,6 +922,58 @@ def format_bucket_title(group_name: str, bucket: dict[str, Any]) -> str:
     return base or "Limit"
 
 
+
+def bucket_sort_key(bucket: dict[str, Any]) -> int:
+    raw_window = str(bucket.get("window", "")).strip().lower()
+    raw_id = str(bucket.get("id", "")).strip().lower()
+    raw_name = str(bucket.get("name", "")).strip().lower()
+    combined = f"{raw_window} {raw_id} {raw_name}"
+    if "5h" in combined or "session" in combined or "hour" in combined:
+        return 0
+    if "day" in combined or "daily" in combined:
+        return 1
+    if "week" in combined:
+        return 2
+    if "month" in combined:
+        return 3
+    return 4
+
+
+def limit_window_rank(entry: dict[str, Any]) -> int:
+    text = (str(entry.get("title", "")) + " " + str(entry.get("label", ""))).lower()
+    if "session" in text or "5h" in text or "hour" in text:
+        return 0
+    if "daily" in text or "day" in text:
+        return 1
+    if "weekly" in text or "week" in text:
+        return 2
+    if "monthly" in text or "month" in text:
+        return 3
+    return 4
+
+
+def sort_limits(limits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not isinstance(limits, list):
+        return []
+    # Preserve family/model group order while placing session before weekly within each group
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for entry in limits:
+        if not isinstance(entry, dict):
+            continue
+        text = str(entry.get("title") or entry.get("label") or "").strip()
+        group_key = re.sub(
+            r"(\s+|^)(session|weekly|daily|monthly|hour|day|week|month)\b.*$",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip().lower()
+        groups.setdefault(group_key, []).append(entry)
+
+    sorted_limits: list[dict[str, Any]] = []
+    for entry_list in groups.values():
+        sorted_limits.extend(sorted(entry_list, key=limit_window_rank))
+    return sorted_limits
+
 def parse_quota_limits(quota_summary: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not quota_summary or not isinstance(quota_summary, dict):
         return []
@@ -938,7 +990,13 @@ def parse_quota_limits(quota_summary: dict[str, Any] | None) -> list[dict[str, A
             if not isinstance(group, dict):
                 continue
             group_name = group.get("displayName") or group.get("name") or ""
-            for bucket in group.get("buckets", []):
+            raw_buckets = group.get("buckets", [])
+            buckets = (
+                sorted(raw_buckets, key=bucket_sort_key)
+                if isinstance(raw_buckets, list)
+                else []
+            )
+            for bucket in buckets:
                 if not isinstance(bucket, dict):
                     continue
                 rem_frac = bucket.get("remainingFraction")
@@ -972,7 +1030,7 @@ def parse_quota_limits(quota_summary: dict[str, Any] | None) -> list[dict[str, A
                         "resetsAt": reset_time,
                     }
                 )
-    return limits
+    return sort_limits(limits)
 
 
 def find_antigravity_binary() -> str | None:
@@ -1125,11 +1183,13 @@ def usable_cached_limits(cached: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(entries, list):
         return []
     now = dt.datetime.now(dt.timezone.utc)
-    return [
-        entry
-        for entry in entries
-        if isinstance(entry, dict) and limit_window_open(entry, now)
-    ]
+    return sort_limits(
+        [
+            entry
+            for entry in entries
+            if isinstance(entry, dict) and limit_window_open(entry, now)
+        ]
+    )
 
 
 def collect_limits(force: bool) -> dict[str, Any]:
@@ -1254,7 +1314,8 @@ def collect_limits(force: bool) -> dict[str, Any]:
 
     if probe.ok:
         tier = probe.tier_label or cached_tier or declared_plan() or FALLBACK_TIER
-        result["limits"] = probe.limits or []
+        ordered_limits = sort_limits(probe.limits or [])
+        result["limits"] = ordered_limits
         result["tierLabel"] = tier
         result["usageStatusText"] = ""
         result["authHelpText"] = ""
@@ -1264,7 +1325,7 @@ def collect_limits(force: bool) -> dict[str, Any]:
                 "fetchedAtMs": round(time.time() * 1000),
                 "tierLabel": tier,
                 "projectId": probe.project_id,
-                "limits": probe.limits or [],
+                "limits": ordered_limits,
             },
         )
         return result
@@ -1273,7 +1334,8 @@ def collect_limits(force: bool) -> dict[str, Any]:
     cli_result = probe_antigravity_cli()
     if cli_result and cli_result.limits:
         tier = probe.tier_label or cached_tier or declared_plan() or FALLBACK_TIER
-        result["limits"] = cli_result.limits
+        ordered_limits = sort_limits(cli_result.limits)
+        result["limits"] = ordered_limits
         result["tierLabel"] = tier
         result["usageStatusText"] = ""
         result["authHelpText"] = ""
@@ -1283,7 +1345,7 @@ def collect_limits(force: bool) -> dict[str, Any]:
                 "fetchedAtMs": round(time.time() * 1000),
                 "tierLabel": tier,
                 "projectId": probe.project_id if probe.ok else "",
-                "limits": cli_result.limits,
+                "limits": ordered_limits,
             },
         )
         return result
@@ -1325,6 +1387,7 @@ def collect_limits(force: bool) -> dict[str, Any]:
                 or "Google Cloud Code backend returned an error. Local Antigravity stats are still shown."
             )
 
+    result["limits"] = sort_limits(result["limits"])
     return result
 
 
@@ -1403,7 +1466,7 @@ def main() -> int:
         "tierLabel": limits["tierLabel"],
         "usageStatusText": limits["usageStatusText"],
         "authHelpText": limits["authHelpText"],
-        "limits": limits["limits"],
+        "limits": sort_limits(limits["limits"]),
     }
     if limits.get("retryAdvised"):
         record["retryAdvised"] = True
