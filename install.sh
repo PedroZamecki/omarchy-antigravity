@@ -108,7 +108,8 @@ if [[ ! -d \$plugin || \$(omarchy plugin list --json 2>/dev/null | jq -r '.[] | 
   if [[ -f \$plugin/uninstall.sh ]]; then
     bash "\$plugin/uninstall.sh" >/dev/null
   else
-    rm -f "\$0" "\${XDG_STATE_HOME:-\$HOME/.local/state}/omarchy/agents/usage/antigravity.json"
+    for f in ${SHIMS[*]}; do grep -qFx "$MARKER" "\${0%/*}/\$f" 2>/dev/null && rm -f "\${0%/*}/\$f"; done
+    rm -f "\${XDG_STATE_HOME:-\$HOME/.local/state}/omarchy/agents/usage/antigravity.json"
     [[ \$(cat "\$HOME/.config/omarchy/defaults/agent" 2>/dev/null) == antigravity ]] && rm -f "\$HOME/.config/omarchy/defaults/agent"
   fi
   exec "\${OMARCHY_PATH:-/usr/share/omarchy}/bin/$name" "\$@"
