@@ -26,12 +26,12 @@ owned_by_plugin() {
 }
 
 # --- Menu row ---------------------------------------------------------------
-# The `when:` guard means a leftover row renders nothing once the plugin folder
-# is gone, so a stale key in the user's menu extension stays inert instead of
+# The `when:` guard means a leftover row renders nothing once the plugin is
+# disabled or gone, so a stale key in the user's menu extension stays inert instead of
 # offering an agent that can no longer be launched.
 # The row always goes right after the opening brace with a trailing comma, which
 # the menu's JSONC reader accepts, so no other line of the file is ever touched.
-ROW='  "'"$MENU_ID"'": {"icon":"\ue908","iconFont":"omarchy-antigravity","label":"Antigravity","when":"[[ -d \"$HOME/.config/omarchy/plugins/zamecki.antigravity\" ]]","checked":"[[ \"$(omarchy-default-agent)\" == \"antigravity\" ]]","action":"omarchy-default-agent antigravity"},'
+ROW='  "'"$MENU_ID"'": {"icon":"\ue908","iconFont":"omarchy-antigravity","label":"Antigravity","when":"omarchy plugin list --json | jq -e '\''.[] | select(.id == \"zamecki.antigravity\" and .enabled)'\'' >/dev/null","checked":"[[ \"$(omarchy-default-agent)\" == \"antigravity\" ]]","action":"omarchy-default-agent antigravity"},'
 
 # A dotfiles symlink is followed, so the edit lands on its target and the link
 # itself survives.
@@ -63,11 +63,13 @@ else
 fi
 
 # --- Shims ------------------------------------------------------------------
-# Only these six lines ever land in ~/.local/bin; the real wrapper logic stays in
+# Only these few lines ever land in ~/.local/bin; the real wrapper logic stays in
 # the plugin folder, so `omarchy plugin update` takes effect without reinstalling.
-# When the plugin folder is gone the shim removes itself, clears a default agent
-# nothing can launch any more, and hands the call to the packaged command -- so
-# every removal path cleans itself up on first use, hook or no hook.
+# Omarchy has no disable or uninstall hook (disabling reloads the whole shell, so
+# a QML teardown handler never gets to run), so the shims are the hook: when the
+# plugin folder is gone, or `omarchy plugin list` reports it disabled, a shim
+# undoes the install and hands the call to the packaged command. An unknown state
+# (the lookup failing) keeps a live install working rather than tearing it down.
 write_shim() {
   local dst="$1"
 
@@ -90,16 +92,28 @@ write_shim() {
 }
 
 for name in "${SHIMS[@]}"; do
+  # The menu's checked: expressions ask omarchy-default-agent for the current
+  # agent once per row. With no arguments the wrapper and the packaged command
+  # answer identically, so that hot path skips the enabled lookup.
+  query=""
+  [[ $name == omarchy-default-agent ]] && query='(($#)) || exec "${OMARCHY_PATH:-/usr/share/omarchy}/bin/omarchy-default-agent"'
   # Keyed on the plugin folder, not on the wrapper being executable: a checkout
   # that drops the exec bit must not read as "plugin removed" and self-destruct.
   write_shim "$BIN_DIR/$name" <<SHIM
 #!/bin/bash
 $MARKER
+$query
 plugin="\$HOME/.config/omarchy/plugins/zamecki.antigravity"
-[[ -d \$plugin ]] && exec bash "\$plugin/wrappers/$name" "\$@"
-rm -f "\$0"
-[[ \$(cat "\$HOME/.config/omarchy/defaults/agent" 2>/dev/null) == antigravity ]] && rm -f "\$HOME/.config/omarchy/defaults/agent"
-exec "\${OMARCHY_PATH:-/usr/share/omarchy}/bin/$name" "\$@"
+if [[ ! -d \$plugin || \$(omarchy plugin list --json 2>/dev/null | jq -r '.[] | select(.id == "zamecki.antigravity") | .enabled') == false ]]; then
+  if [[ -f \$plugin/uninstall.sh ]]; then
+    bash "\$plugin/uninstall.sh" >/dev/null
+  else
+    rm -f "\$0" "\${XDG_STATE_HOME:-\$HOME/.local/state}/omarchy/agents/usage/antigravity.json"
+    [[ \$(cat "\$HOME/.config/omarchy/defaults/agent" 2>/dev/null) == antigravity ]] && rm -f "\$HOME/.config/omarchy/defaults/agent"
+  fi
+  exec "\${OMARCHY_PATH:-/usr/share/omarchy}/bin/$name" "\$@"
+fi
+exec bash "\$plugin/wrappers/$name" "\$@"
 SHIM
   echo "shim: installed $BIN_DIR/$name"
 done

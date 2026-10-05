@@ -89,7 +89,7 @@ It touches exactly two places outside the plugin folder:
 1. Adds or updates the `setup.default.agent.antigravity` row in
    `~/.config/omarchy/extensions/omarchy-menu.jsonc`. The row carries a `when:`
    guard on the plugin folder, so it renders nothing if the plugin is gone.
-2. Writes three six-line shims into `~/.local/bin/` — `omarchy-default-agent`,
+2. Writes three small shims into `~/.local/bin/` — `omarchy-default-agent`,
    `omarchy-agent`, and `omarchy-agent-usage-update` — so the menu rows, bar
    launch, and panel refreshes include Antigravity alongside the built-in agents.
    Each shim only forwards to the matching script in this plugin's `wrappers/`.
@@ -121,21 +121,23 @@ refuses to write through a symlink, rather than overwriting either.
 
 ## Uninstall
 
-Removal is automatic. Omarchy has no uninstall hook, so the plugin covers it from
-two sides:
+Removal is automatic. Omarchy has no disable or uninstall hook (disabling a
+plugin reloads the whole shell, so a plugin cannot run code on the way out), so
+the shims act as the hook:
 
 ```sh
-omarchy plugin remove zamecki.antigravity
+omarchy plugin disable zamecki.antigravity   # or: omarchy plugin remove zamecki.antigravity
 ```
 
-- **On disable or remove**, `Service.qml` sees the plugin flip to disabled as it
-  is destroyed and runs `uninstall.sh` for you. A shell restart does not trigger
-  this, because the plugin is still enabled at that point.
-- **On any other removal path** — a manual `rm -rf`, or a removal while the shell
-  is not running — each shim notices its wrapper is gone the next time it is
-  called: it deletes itself, clears a `defaults/agent` set to `antigravity`
-  (nothing could launch it any more), and hands the call to the packaged Omarchy
-  command. The leftover menu row's `when:` guard already hides it.
+- The menu row's `when:` guard asks `omarchy plugin list` whether the plugin is
+  enabled, so the row disappears as soon as it is disabled or removed.
+- The next time anything calls one of the shims (the agents panel's refresh, a
+  launch, picking a default agent), the shim sees the plugin disabled or gone,
+  runs `uninstall.sh` (or, if the folder is already deleted, removes itself, the
+  usage record and a `defaults/agent` set to `antigravity`), and hands the call
+  to the packaged Omarchy command.
+- If the lookup itself fails, the shim keeps working instead of tearing down a
+  live install.
 
 To revert everything by hand at any time:
 
