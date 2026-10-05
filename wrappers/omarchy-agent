@@ -1,21 +1,25 @@
 #!/bin/bash
 
 # zamecki.antigravity: Launch the default coding agent in a terminal.
-# Shadows /usr/share/omarchy/bin/omarchy-agent to launch the Antigravity CLI
-# (agy) when it is the default; every other agent is delegated to the packaged
-# command.
+# Shadows the packaged omarchy-agent to launch the Antigravity CLI (agy) when it
+# is the default; every other agent is handed to the packaged command untouched.
 
-packaged=/usr/share/omarchy/bin/omarchy-agent
-[[ -f $packaged ]] || packaged=omarchy-agent
+packaged="${OMARCHY_PATH:-/usr/share/omarchy}/bin/omarchy-agent"
+# Never fall back to a bare name: on PATH that resolves to this wrapper's shim.
+if [[ ! -x $packaged ]]; then
+  echo "omarchy-agent: $packaged not found" >&2
+  exit 1
+fi
+
+[[ $(omarchy-default-agent) == "antigravity" ]] || exec "$packaged" "$@"
 
 inline=false
-pick=false
 prompt=""
 
 while (($#)); do
   case "$1" in
     --inline) inline=true; shift ;;
-    --pick) pick=true; shift ;;
+    --pick) shift ;;
     --prompt)
       prompt=${2:?--prompt needs a value}
       shift 2
@@ -30,22 +34,6 @@ done
 
 [[ $PWD == "$HOME" && -d $HOME/Work ]] && cd "$HOME/Work"
 
-agent=$(omarchy-default-agent)
-
-if [[ -z $agent ]]; then
-  [[ $pick == "true" ]] && exec omarchy-menu summon setup.default.agent
-  echo "Choose default agent with: omarchy default agent <name>" >&2
-  exit 1
-fi
-
-if [[ $agent != "antigravity" ]]; then
-  args=()
-  [[ $inline == "true" ]] && args+=(--inline)
-  [[ $pick == "true" ]] && args+=(--pick)
-  [[ -n $prompt ]] && args+=(--prompt "$prompt")
-  exec "$packaged" "${args[@]}"
-fi
-
 # The Antigravity binary is agy, not antigravity, so the generic presence check
 # would report a missing command.
 if omarchy-cmd-missing agy; then
@@ -54,16 +42,11 @@ if omarchy-cmd-missing agy; then
 fi
 
 command=(agy --dangerously-skip-permissions)
-[[ -n ${prompt:-} ]] && command+=(--prompt-interactive "$prompt")
+[[ -n $prompt ]] && command+=(--prompt-interactive "$prompt")
 
+# Usage refreshes on its own: Service.qml watches agy's history and conversations.
 if [[ $inline == "true" ]]; then
-  "${command[@]}"
-  ret=$?
-  omarchy-agent-usage-antigravity --write >/dev/null 2>&1 &
-  exit $ret
+  exec "${command[@]}"
 else
-  omarchy-launch-tui --app-id=org.omarchy.agent "${command[@]}"
-  ret=$?
-  omarchy-agent-usage-antigravity --write >/dev/null 2>&1 &
-  exit $ret
+  exec omarchy-launch-tui --app-id=org.omarchy.agent "${command[@]}"
 fi

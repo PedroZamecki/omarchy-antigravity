@@ -7,8 +7,8 @@
 Everything the agents panel shows for Antigravity comes from this one
 command: local transcript stats from ~/.gemini/antigravity-cli/brain,
 conversations databases across ~/.gemini, the summaries database and
-history fallbacks, and authoritative rate limits from the Google Cloud
-Code backend. The panel itself only ever reads the JSON this prints;
+history fallbacks, and rate limits from agy's own `/quota` command.
+The panel itself only ever reads the JSON this prints;
 it never talks to disk formats or endpoints.
 """
 
@@ -27,9 +27,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -37,37 +34,9 @@ AGENT_ID = "antigravity"
 AGENT_NAME = "Antigravity"
 AUTH_HELP = "Run `agy` to sign in to Antigravity."
 
-PROBE_MIN_INTERVAL_SECONDS = 15
+LIMITS_REUSE_SECONDS = 300
 SCAN_REUSE_SECONDS = 20
 LIMITS_ONLY_REUSE_SECONDS = 900
-
-OAUTH_CLIENTS = [
-    (
-        "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
-        "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",
-    ),
-    (
-        "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
-        "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",
-    ),
-    (
-        "884354919052-36trc1jjb3tguiac32ov6cod268c5blh.apps.googleusercontent.com",
-        "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",
-    ),
-    (
-        "884354919052-36trc1jjb3tguiac32ov6cod268c5blh.apps.googleusercontent.com",
-        "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",
-    ),
-]
-OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
-
-CODE_ASSIST_HOSTS = [
-    "https://daily-cloudcode-pa.googleapis.com",
-    "https://cloudcode-pa.googleapis.com",
-]
-
-KEYRING_TOKEN_SERVICE = "gemini"
-KEYRING_TOKEN_USERNAME = "antigravity"
 
 FALLBACK_TIER = "Antigravity"
 
@@ -723,176 +692,6 @@ def cached_scan(app_dir: Path, max_age_seconds: float) -> dict[str, Any]:
 # ---------------------------------------------------------------- auth & limits
 
 
-def read_keyring_token() -> tuple[dict[str, Any] | None, str]:
-    """Reads stored OAuth token JSON from secret-tool."""
-    try:
-        out = subprocess.run(
-            [
-                "secret-tool",
-                "lookup",
-                "service",
-                KEYRING_TOKEN_SERVICE,
-                "username",
-                KEYRING_TOKEN_USERNAME,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except FileNotFoundError:
-        return None, "no_secret_tool"
-    except (OSError, subprocess.TimeoutExpired):
-        return None, "secret_tool_error"
-
-    if out.returncode != 0 or not out.stdout.strip():
-        return None, "empty"
-
-    try:
-        data = json.loads(out.stdout)
-    except ValueError:
-        return None, "invalid_json"
-
-    token = data.get("token")
-    if not isinstance(token, dict):
-        return None, "no_token_dict"
-
-    return token, "ok"
-
-
-def token_is_valid(token: dict[str, Any]) -> bool:
-    expiry_str = token.get("expiry")
-    if not isinstance(expiry_str, str):
-        return True
-    try:
-        expiry_dt = dt.datetime.fromisoformat(expiry_str)
-        # 60s buffer to prevent edge-of-expiry race conditions
-        return expiry_dt > (dt.datetime.now().astimezone() + dt.timedelta(seconds=60))
-    except ValueError:
-        return True
-
-
-class RefreshResult:
-    def __init__(
-        self, access_token: str | None, error_type: str = "", error_code: int = 0
-    ):
-        self.access_token = access_token
-        # error_type: "invalid_grant", "transport", "http_error", ""
-        self.error_type = error_type
-        self.error_code = error_code
-
-
-def refresh_oauth_token(refresh_token: str) -> RefreshResult:
-    if not refresh_token:
-        return RefreshResult(None, error_type="invalid_grant")
-
-    last_error_type = "invalid_grant"
-    last_error_code = 0
-
-    for client_id, client_secret in OAUTH_CLIENTS:
-        payload = urllib.parse.urlencode(
-            {
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "refresh_token": refresh_token,
-                "grant_type": "refresh_token",
-            }
-        ).encode("utf-8")
-        req = urllib.request.Request(
-            OAUTH_TOKEN_URL,
-            data=payload,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                new_token = data.get("access_token")
-                if new_token:
-                    return RefreshResult(new_token)
-        except urllib.error.HTTPError as err:
-            last_error_code = err.code
-            try:
-                body = json.loads(err.read().decode("utf-8", errors="replace"))
-                err_str = str(body.get("error") or "")
-                if "invalid_grant" in err_str or "unauthorized_client" in err_str:
-                    last_error_type = "invalid_grant"
-                else:
-                    last_error_type = "http_error"
-            except Exception:
-                last_error_type = "http_error"
-        except (urllib.error.URLError, TimeoutError, OSError):
-            last_error_type = "transport"
-
-    return RefreshResult(None, error_type=last_error_type, error_code=last_error_code)
-
-
-class BackendResult:
-    def __init__(
-        self,
-        ok: bool,
-        tier_label: str = "",
-        project_id: str = "",
-        limits: list[dict[str, Any]] | None = None,
-        error_type: str = "",  # "unauthenticated", "rate_limited", "transport", "http_error"
-        http_code: int = 0,
-        help_text: str = "",
-        retry_after: str = "",
-    ):
-        self.ok = ok
-        self.tier_label = tier_label
-        self.project_id = project_id
-        self.limits = limits or []
-        self.error_type = error_type
-        self.http_code = http_code
-        self.help_text = help_text
-        self.retry_after = retry_after
-
-
-def post_json(
-    url: str, payload_dict: dict[str, Any], access_token: str, timeout: int = 8
-) -> tuple[dict[str, Any] | None, BackendResult | None]:
-    payload_bytes = json.dumps(payload_dict).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=payload_bytes,
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json",
-            "User-Agent": "antigravity-cli",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8", errors="replace"))
-            return data, None
-    except urllib.error.HTTPError as error:
-        retry_after = error.headers.get("retry-after", "") if error.headers else ""
-        if error.code in (401, 403):
-            return None, BackendResult(
-                ok=False, error_type="unauthenticated", http_code=error.code
-            )
-        if error.code == 429:
-            return None, BackendResult(
-                ok=False,
-                error_type="rate_limited",
-                http_code=error.code,
-                retry_after=retry_after,
-            )
-        return None, BackendResult(
-            ok=False,
-            error_type="http_error",
-            http_code=error.code,
-            help_text=f"Google Cloud Code backend returned status {error.code}. Local Antigravity stats are still shown.",
-        )
-    except Exception:
-        return None, BackendResult(
-            ok=False,
-            error_type="transport",
-            help_text="Couldn't reach Google Cloud Code backend. Retrying shortly. Local Antigravity stats are still shown.",
-        )
-
-
 def format_bucket_title(group_name: str, bucket: dict[str, Any]) -> str:
     gn = (group_name or "").strip()
     raw_window = str(bucket.get("window", "")).strip().lower()
@@ -1034,9 +833,11 @@ def parse_quota_limits(quota_summary: dict[str, Any] | None) -> list[dict[str, A
 
 
 def find_antigravity_binary() -> str | None:
-    binary = shutil.which("antigravity")
-    if binary:
-        return binary
+    # The shell's PATH may not carry mise shims, so fall back to mise's install dir.
+    for name in ("agy", "antigravity"):
+        binary = shutil.which(name)
+        if binary:
+            return binary
     fallback = (
         Path.home()
         / ".local/share/mise/installs/aqua-google-antigravity-antigravity-cli/latest/antigravity"
@@ -1046,123 +847,25 @@ def find_antigravity_binary() -> str | None:
     return None
 
 
-def probe_antigravity_cli() -> BackendResult | None:
+def probe_antigravity_cli() -> list[dict[str, Any]]:
+    # agy owns its sign-in: asking it for /quota (no model turn) keeps OAuth
+    # tokens and client credentials out of this plugin entirely.
     binary = find_antigravity_binary()
     if not binary:
-        return None
+        return []
     try:
         proc = subprocess.run(
             [binary, "-p", "/quota", "--output-format", "json"],
             capture_output=True,
             text=True,
-            timeout=8,
+            timeout=20,
         )
         if proc.returncode == 0 and proc.stdout.strip():
-            raw_data = json.loads(proc.stdout)
-            limits = parse_quota_limits(raw_data)
-            if limits:
-                return BackendResult(ok=True, limits=limits)
-    except Exception:
+            return parse_quota_limits(json.loads(proc.stdout))
+    except (OSError, subprocess.TimeoutExpired, ValueError):
         pass
-    return None
+    return []
 
-
-def parse_tier_from_account(data: dict[str, Any]) -> tuple[str, str]:
-    project_id = str(data.get("cloudaicompanionProject") or "")
-
-    tier_name = ""
-    paid_tier = data.get("paidTier")
-    if isinstance(paid_tier, dict) and paid_tier.get("name"):
-        tier_name = str(paid_tier["name"])
-    elif isinstance(data.get("currentTier"), dict) and data["currentTier"].get("name"):
-        tier_name = str(data["currentTier"]["name"])
-    elif isinstance(data.get("allowedTiers"), list) and data["allowedTiers"]:
-        for t in data["allowedTiers"]:
-            if isinstance(t, dict) and t.get("isDefault"):
-                tier_name = str(t.get("name") or "")
-                break
-        if not tier_name and isinstance(data["allowedTiers"][0], dict):
-            tier_name = str(data["allowedTiers"][0].get("name") or "")
-
-    return tier_name or FALLBACK_TIER, project_id
-
-
-def probe_antigravity_backend(access_token: str) -> BackendResult:
-    account_data = None
-    account_err = None
-    successful_host = None
-    for host in CODE_ASSIST_HOSTS:
-        account_data, account_err = post_json(
-            f"{host}/v1internal:loadCodeAssist", {}, access_token, timeout=8
-        )
-        if account_data:
-            successful_host = host
-            break
-        if account_err and account_err.error_type == "unauthenticated":
-            return account_err
-
-    if not account_data:
-        cli_res = probe_antigravity_cli()
-        if cli_res and cli_res.ok and cli_res.limits:
-            return cli_res
-        return account_err or BackendResult(ok=False, error_type="http_error")
-
-    tier_name, project_id = parse_tier_from_account(account_data)
-
-    if not project_id:
-        cli_res = probe_antigravity_cli()
-        if cli_res and cli_res.ok and cli_res.limits:
-            return BackendResult(
-                ok=True,
-                tier_label=tier_name or cli_res.tier_label,
-                project_id="",
-                limits=cli_res.limits,
-            )
-        return BackendResult(ok=True, tier_label=tier_name, project_id="", limits=[])
-
-    quota_data = None
-    quota_err = None
-    hosts_to_try = [successful_host] if successful_host else []
-    for h in CODE_ASSIST_HOSTS:
-        if h not in hosts_to_try:
-            hosts_to_try.append(h)
-
-    for host in hosts_to_try:
-        quota_data, quota_err = post_json(
-            f"{host}/v1internal:retrieveUserQuotaSummary",
-            {"project": project_id},
-            access_token,
-            timeout=8,
-        )
-        if quota_data:
-            break
-        if quota_err and quota_err.error_type == "unauthenticated":
-            return quota_err
-
-    if not quota_data:
-        cli_res = probe_antigravity_cli()
-        if cli_res and cli_res.ok and cli_res.limits:
-            return BackendResult(
-                ok=True,
-                tier_label=tier_name or cli_res.tier_label,
-                project_id=project_id,
-                limits=cli_res.limits,
-            )
-        if quota_err and quota_err.error_type == "unauthenticated":
-            return quota_err
-        return BackendResult(
-            ok=True, tier_label=tier_name, project_id=project_id, limits=[]
-        )
-
-    limits = parse_quota_limits(quota_data)
-    if not limits:
-        cli_res = probe_antigravity_cli()
-        if cli_res and cli_res.ok and cli_res.limits:
-            limits = cli_res.limits
-
-    return BackendResult(
-        ok=True, tier_label=tier_name, project_id=project_id, limits=limits
-    )
 
 
 def limit_window_open(entry: dict[str, Any], now: dt.datetime) -> bool:
@@ -1193,201 +896,31 @@ def usable_cached_limits(cached: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def collect_limits(force: bool) -> dict[str, Any]:
-    result = {
-        "limits": [],
-        "tierLabel": "",
-        "usageStatusText": "",
-        "authHelpText": AUTH_HELP,
-        "retryAdvised": False,
-    }
-
     probe_cache = cache_root() / "antigravity-limits.json"
     cached = read_fresh_json(probe_cache, float("inf")) or {}
-    fallback = usable_cached_limits(cached)
-    cached_tier = str(cached.get("tierLabel") or "")
 
-    token_data, _ = read_keyring_token()
-
-    # 1. No account in keyring (never authenticated or signed out)
-    if token_data is None or not isinstance(token_data, dict):
-        cli_result = probe_antigravity_cli()
-        if cli_result and cli_result.limits:
-            tier = declared_plan() or cached_tier or FALLBACK_TIER
-            result["limits"] = cli_result.limits
-            result["tierLabel"] = tier
-            result["usageStatusText"] = ""
-            result["authHelpText"] = ""
-            write_json(
-                probe_cache,
-                {
-                    "fetchedAtMs": round(time.time() * 1000),
-                    "tierLabel": tier,
-                    "projectId": "",
-                    "limits": cli_result.limits,
-                },
-            )
-            return result
-        result["limits"] = fallback
-        result["tierLabel"] = declared_plan() or cached_tier or FALLBACK_TIER
-        result["usageStatusText"] = "Waiting for auth"
-        result["authHelpText"] = AUTH_HELP
-        return result
-
-    access_token = str(token_data.get("access_token") or "")
-    refresh_token = str(token_data.get("refresh_token") or "")
-
-    if not access_token and not refresh_token:
-        result["limits"] = fallback
-        result["tierLabel"] = declared_plan() or cached_tier or FALLBACK_TIER
-        result["usageStatusText"] = "Waiting for auth"
-        result["authHelpText"] = AUTH_HELP
-        return result
-
-    # 2. Check if access token is expired; try refreshing if needed
-    refreshed = False
-    if not token_is_valid(token_data) or not access_token:
-        if refresh_token:
-            refresh_res = refresh_oauth_token(refresh_token)
-            if refresh_res.access_token:
-                access_token = refresh_res.access_token
-                refreshed = True
-            elif refresh_res.error_type == "invalid_grant":
-                result["limits"] = fallback
-                result["tierLabel"] = declared_plan() or cached_tier or FALLBACK_TIER
-                result["usageStatusText"] = "Sign-in expired"
-                result["authHelpText"] = (
-                    "Antigravity's saved sign-in expired"
-                    + (" — showing the last known limits." if fallback else ".")
-                    + " Start Antigravity, or run `agy`, to refresh it."
-                )
-                return result
-            elif refresh_res.error_type == "transport":
-                result["retryAdvised"] = True
-                result["limits"] = fallback
-                result["tierLabel"] = declared_plan() or cached_tier or FALLBACK_TIER
-                if not fallback:
-                    result["usageStatusText"] = "Antigravity limits unavailable"
-                    result["authHelpText"] = (
-                        "Couldn't reach Google OAuth service. Retrying shortly. Local Antigravity stats are still shown."
-                    )
-                return result
-        else:
-            result["limits"] = fallback
-            result["tierLabel"] = declared_plan() or cached_tier or FALLBACK_TIER
-            result["usageStatusText"] = "Sign-in expired"
-            result["authHelpText"] = (
-                "Antigravity's saved sign-in expired"
-                + (" — showing the last known limits." if fallback else ".")
-                + " Start Antigravity, or run `agy`, to refresh it."
-            )
-            return result
-
-    # 3. Probe cache freshness window
+    # agy takes a few seconds per call, so live limits are fetched at most every
+    # LIMITS_REUSE_SECONDS. Failed attempts are cached too, so a signed-out agy
+    # is not re-run on every refresh.
     fetched_at = number(cached.get("fetchedAtMs")) / 1000.0
-    if (
-        fallback
-        and not force
-        and not refreshed
-        and (time.time() - fetched_at < PROBE_MIN_INTERVAL_SECONDS)
-    ):
-        result["limits"] = fallback
-        result["tierLabel"] = cached_tier or declared_plan() or FALLBACK_TIER
-        result["usageStatusText"] = ""
-        result["authHelpText"] = ""
-        return result
+    if force or time.time() - fetched_at >= LIMITS_REUSE_SECONDS:
+        probed = probe_antigravity_cli()
+        cached = {
+            "fetchedAtMs": round(time.time() * 1000),
+            "ok": bool(probed),
+            "limits": probed or cached.get("limits") or [],
+        }
+        write_json(probe_cache, cached)
 
-    # 4. Probe live backend
-    probe = probe_antigravity_backend(access_token)
-
-    # If backend returned 401 Unauthorized, token may have expired server-side: refresh once
-    if (
-        not probe.ok
-        and probe.error_type == "unauthenticated"
-        and not refreshed
-        and refresh_token
-    ):
-        refresh_res = refresh_oauth_token(refresh_token)
-        if refresh_res.access_token:
-            access_token = refresh_res.access_token
-            refreshed = True
-            probe = probe_antigravity_backend(access_token)
-
-    if probe.ok:
-        tier = probe.tier_label or cached_tier or declared_plan() or FALLBACK_TIER
-        ordered_limits = sort_limits(probe.limits or [])
-        result["limits"] = ordered_limits
-        result["tierLabel"] = tier
-        result["usageStatusText"] = ""
-        result["authHelpText"] = ""
-        write_json(
-            probe_cache,
-            {
-                "fetchedAtMs": round(time.time() * 1000),
-                "tierLabel": tier,
-                "projectId": probe.project_id,
-                "limits": ordered_limits,
-            },
-        )
-        return result
-
-    # 5. Handle probe failures
-    cli_result = probe_antigravity_cli()
-    if cli_result and cli_result.limits:
-        tier = probe.tier_label or cached_tier or declared_plan() or FALLBACK_TIER
-        ordered_limits = sort_limits(cli_result.limits)
-        result["limits"] = ordered_limits
-        result["tierLabel"] = tier
-        result["usageStatusText"] = ""
-        result["authHelpText"] = ""
-        write_json(
-            probe_cache,
-            {
-                "fetchedAtMs": round(time.time() * 1000),
-                "tierLabel": tier,
-                "projectId": probe.project_id if probe.ok else "",
-                "limits": ordered_limits,
-            },
-        )
-        return result
-
-    result["tierLabel"] = declared_plan() or cached_tier or FALLBACK_TIER
-
-    if probe.error_type == "unauthenticated":
-        result["limits"] = fallback
-        result["usageStatusText"] = "Sign-in expired"
-        result["authHelpText"] = (
-            "Antigravity's saved sign-in expired"
-            + (" — showing the last known limits." if fallback else ".")
-            + " Start Antigravity, or run `agy`, to refresh it."
-        )
-        return result
-
-    if probe.error_type == "transport":
-        result["retryAdvised"] = True
-
-    if fallback:
-        result["limits"] = fallback
-    else:
+    result = {
+        "limits": usable_cached_limits(cached),
+        "tierLabel": declared_plan() or FALLBACK_TIER,
+        "usageStatusText": "",
+        "authHelpText": "",
+    }
+    if not result["limits"] and cached.get("ok") is False:
         result["usageStatusText"] = "Antigravity limits unavailable"
-        if probe.error_type == "rate_limited":
-            retry_text = (
-                f" (retry after {probe.retry_after}s)" if probe.retry_after else ""
-            )
-            result["authHelpText"] = (
-                f"Google Cloud Code backend is rate limiting checks right now{retry_text}. "
-                "Local Antigravity stats are still shown."
-            )
-        elif probe.error_type == "transport":
-            result["authHelpText"] = (
-                "Couldn't reach Google Cloud Code backend. Retrying shortly. Local Antigravity stats are still shown."
-            )
-        else:
-            result["authHelpText"] = (
-                probe.help_text
-                or "Google Cloud Code backend returned an error. Local Antigravity stats are still shown."
-            )
-
-    result["limits"] = sort_limits(result["limits"])
+        result["authHelpText"] = AUTH_HELP
     return result
 
 
@@ -1468,8 +1001,6 @@ def main() -> int:
         "authHelpText": limits["authHelpText"],
         "limits": sort_limits(limits["limits"]),
     }
-    if limits.get("retryAdvised"):
-        record["retryAdvised"] = True
     record.update(stats)
 
     output = json.dumps(record, separators=(",", ":"), sort_keys=True)

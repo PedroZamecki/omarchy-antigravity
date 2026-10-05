@@ -8,7 +8,7 @@ Omarchy agent option, alongside the agents shipped by `omarchy.agents`.
 ## What it does
 
 - **Agents panel tab** — a service writes a usage record to
-  `~/.local/state/omarchy/agents/usage/antigravity.json` every 15 minutes (and at
+  `~/.local/state/omarchy/agents/usage/antigravity.json` every 5 minutes (and at
   shell start). The existing agents panel picks it up automatically and shows a
   new "Antigravity" subscription card.
 
@@ -24,7 +24,7 @@ Omarchy agent option, alongside the agents shipped by `omarchy.agents`.
 
   <p>
     <img src="assets/default_agent_selection.png" alt="Omarchy Default Agent Menu" height="300" />
-    <img src="assets/auto_agent_install_default_agent.png" alt="On-demand Installation via Aqua" height="300" />
+    <img src="assets/default_agent_first_run.png" alt="On-demand Installation via Aqua" height="300" />
   </p>
 
 - **Agent launch** — the bar's agent icon / `omarchy agent` flow launches `agy`
@@ -38,21 +38,17 @@ Python 3 script. It builds the same record schema as the other agent collectors:
 
 | Field                                                                           | Source                                                                                                                                                                                                                |
 | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tierLabel`                                                                     | Live call to `cloudcode-pa.googleapis.com/v1internal:loadCodeAssist` with OAuth token. Returns the active tier name, e.g. "Antigravity Starter Quota", "Google AI Pro", etc.                                          |
-| `limits`                                                                        | Live call to `cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` with companion project ID returning authoritative quota groups, usage fractions, and reset timestamps.                                 |
+| `tierLabel` | The plan declared in `~/.config/omarchy/agents/antigravity.json` (see below); `agy` does not report it. |
+| `limits` | `agy -p /quota --output-format json`: agy's own quota command (no model turn), so sign-in and tokens never leave agy. Cached for 5 minutes. |
 | `todayTotalTokens` / `todayTokensByModel` / `modelUsage`                        | Scanned from local conversation transcripts (`~/.gemini/antigravity-cli/brain/*/logs/transcript.jsonl`), tracking model switches and token counts per model.                                                          |
 | `todayPrompts` / `totalPrompts`                                                 | The CLI's prompt history and transcript records.                                                                                                                                                                      |
 | `todaySessions` / `totalSessions` / `activeDays` / `activeDates` / `recentDays` | Brain transcripts combined with `conversation_summaries.db` (`~/.gemini/antigravity-cli/`) for 7-day token and prompt activity charts.                                                                                |
-| `usageStatusText` / `authHelpText`                                              | Status banner and help instructions ("Waiting for auth" with `Run \`agy\` to sign in to Antigravity.` when never authed, "Sign-in expired" when credentials expired/invalidated, or rate limit / transport statuses). |
+| `usageStatusText` / `authHelpText` | "Antigravity limits unavailable" plus `Run \`agy\` to sign in to Antigravity.` when agy is missing, signed out, or offline and no earlier limits are cached. |
 
-When the stored access token expires, the collector automatically refreshes it
-against Google's OAuth2 token endpoint using the stored refresh token. If authentication
-is invalidated or missing, the collector reports the corresponding auth state
-("Waiting for auth" vs "Sign-in expired"), and gracefully shows last known valid limits
-until re-authentication.
+The plugin never reads agy's credentials and makes no network calls of its own;
+the only network traffic is whatever `agy /quota` does itself.
 
-**Fallback tier:** if the user is signed out or the live call fails, the tier
-label falls back to the declared plan in
+**Tier label:** `agy` does not report the plan, so the label comes from
 `~/.config/omarchy/agents/antigravity.json`:
 
 ```json
@@ -60,6 +56,20 @@ label falls back to the declared plan in
 ```
 
 When it is absent, the neutral label `Antigravity` is used.
+
+## Dependencies and privileges
+
+- **Runtime:** `python3` (collector), `mise` (on-demand install of `agy` from
+  the aqua registry), and `agy` itself for limits.
+- **Reads:** `~/.gemini/antigravity-cli/` (history, transcripts, and SQLite
+  databases opened read-only).
+- **Writes outside the plugin folder:** the menu row and the three shims listed
+  under Install, the usage record in `~/.local/state/omarchy/agents/usage/`,
+  cache files in `~/.cache/omarchy/agent-usage/antigravity-*`, and
+  `~/.config/omarchy/defaults/agent` when you pick Antigravity.
+- **Runs:** `install.sh` on every shell start (idempotent), the collector every
+  5 minutes and after agy activity, and `uninstall.sh` on disable or remove.
+- **No root, no system files, no network calls of its own.**
 
 ## Install
 
@@ -101,6 +111,13 @@ refuses to write through a symlink, rather than overwriting either.
   go through the shell and use the wrappers, so they work. Running
   `omarchy agent` from a terminal with Antigravity as the default prints a clear
   message and exits.
+- **Agents panel icon.** The panel only looks for marks inside its own `assets/`
+  folder, so the record `id` is a relative path
+  (`../../…/zamecki.antigravity/assets/antigravity`) that resolves to this
+  plugin's SVG. That id therefore contains your home directory path, which also
+  lands in synced snapshots when `syncMode` is on. The usage-update shim treats
+  that id and `antigravity` as the same agent, so disabling Antigravity in the
+  panel's settings still works.
 
 ## Uninstall
 

@@ -17,39 +17,25 @@ set -euo pipefail
 
 MENU_FILE="$HOME/.config/omarchy/extensions/omarchy-menu.jsonc"
 MENU_ID="setup.default.agent.antigravity"
+MENU_LINE_RE="^[[:space:]]*\"${MENU_ID//./\\.}\"[[:space:]]*:"
 BIN_DIR="$HOME/.local/bin"
 SHIMS=(omarchy-default-agent omarchy-agent omarchy-agent-usage-update)
 MARKER='# zamecki.antigravity shim'
-STATE_FILE="$HOME/.local/state/omarchy/agents/usage/antigravity.json"
-CACHE_DIR="$HOME/.cache/omarchy/agent-usage"
+STATE_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agents/usage/antigravity.json"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy/agent-usage"
 DEFAULT_AGENT_FILE="$HOME/.config/omarchy/defaults/agent"
-LEGACY_FONT="$HOME/.local/share/fonts/omarchy-antigravity.ttf"
 
 # --- Menu row ---------------------------------------------------------------
-if [[ -f $MENU_FILE ]]; then
-  python3 - "$MENU_FILE" "$MENU_ID" <<'PYEOF'
-import re, sys
-
-path, key = sys.argv[1], sys.argv[2]
-try:
-    with open(path) as fh:
-        content = fh.read()
-except FileNotFoundError:
-    sys.exit(0)
-
-if '"' + key + '"' not in content:
-    sys.exit(0)
-
-pattern1 = r',\s*\n([ \t]*"' + re.escape(key) + r'"\s*:.*?\n\s*\})'
-content = re.sub(pattern1, r'\n\1', content)
-pattern2 = r'^[ \t]*"' + re.escape(key) + r'"\s*:.*?(?:,\s*|\s*)$(?:\n)?'
-content = re.sub(pattern2, '', content, flags=re.MULTILINE)
-content = re.sub(r',\s*(\n\s*\})', r'\1', content)
-
-with open(path, "w") as fh:
-    fh.write(content)
-print("menu: removed " + key)
-PYEOF
+# install.sh writes the row as one line, so dropping that line is the whole
+# undo. A trailing comma it may leave behind is accepted by the menu's JSONC
+# reader, and nothing else in the file is touched.
+if [[ -f $MENU_FILE ]] && grep -q "$MENU_LINE_RE" "$MENU_FILE"; then
+  menu=$(realpath "$MENU_FILE")
+  tmp=$(mktemp "$menu.XXXXXX")
+  grep -v "$MENU_LINE_RE" "$menu" >"$tmp" || true
+  chmod --reference="$menu" "$tmp"
+  mv -f "$tmp" "$menu"
+  echo "menu: removed $MENU_ID"
 fi
 
 # --- Shims ------------------------------------------------------------------
@@ -78,16 +64,6 @@ shopt -u nullglob
 if ((${#cache_files[@]} > 0)); then
   rm -f "${cache_files[@]}"
   echo "cache: removed ${#cache_files[@]} file(s) from $CACHE_DIR"
-fi
-
-# --- Legacy font --------------------------------------------------------------
-# Older versions installed the icon font system-wide; current Service.qml loads
-# it at runtime instead. Clean it up here too in case uninstall runs before
-# install.sh ever gets a chance to (its own legacy sweep covers the same file).
-if [[ -f $LEGACY_FONT ]]; then
-  rm -f "$LEGACY_FONT"
-  command -v fc-cache >/dev/null 2>&1 && fc-cache -f "$(dirname "$LEGACY_FONT")" >/dev/null 2>&1
-  echo "legacy: removed $LEGACY_FONT"
 fi
 
 # --- Default Agent ----------------------------------------------------------

@@ -10,14 +10,15 @@ Item {
   property var pluginRegistry: null
 
   readonly property string home: Quickshell.env("HOME") || ""
-  readonly property string usageDir: (Quickshell.env("XDG_STATE_HOME") || home + "/.local/state") + "/omarchy/agents/usage"
   readonly property string pluginDir: manifest && manifest.__sourceDir ? manifest.__sourceDir : (home + "/.config/omarchy/plugins/zamecki.antigravity")
   readonly property string collectorPath: pluginDir + "/bin/omarchy-agent-usage-antigravity"
   readonly property string historyFile: home + "/.gemini/antigravity-cli/history.jsonl"
   readonly property string cliConversationsDir: home + "/.gemini/antigravity-cli/conversations"
   readonly property string acpConversationsDir: home + "/.gemini/antigravity-acp/conversations"
 
-  readonly property int refreshIntervalSec: 60
+  // Local stats are cheap and also refresh on every agy write below; live limits
+  // are cached by the collector, so a slow tick costs nothing between agy runs.
+  readonly property int refreshIntervalSec: 300
 
   // The menu row and the agents tab both name this family; loading it here keeps
   // it to the shell process instead of installing a system font.
@@ -46,7 +47,7 @@ Item {
       waitForEnd: true
       onStreamFinished: if (text.trim() !== "") console.warn("zamecki.antigravity install: " + text.trim())
     }
-    onExited: root.runCollector(true)
+    onExited: root.runCollector(false)
   }
 
   Timer {
@@ -64,19 +65,8 @@ Item {
     onTriggered: root.runCollector(false)
   }
 
-  // 1. React immediately when the Agents panel runs omarchy-agent-usage-update
-  // (e.g. when opening the panel, pressing 'r', or clicking refresh).
-  // Claude's file is updated by the upstream script, so watching it lets us
-  // run the Antigravity collector in lockstep.
-  FileView {
-    id: claudeUsageWatch
-    path: root.usageDir + "/claude.json"
-    watchChanges: true
-    printErrors: false
-    onFileChanged: root.runCollector(true)
-  }
-
-  // 2. React immediately when the user interacts with agy or ACP (prompts, answers, auth, conversations)
+  // Panel refreshes reach the collector through the omarchy-agent-usage-update
+  // shim; this covers the user working in agy or ACP between them.
   FileView {
     id: agyHistoryWatch
     path: root.historyFile
