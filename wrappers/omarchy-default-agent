@@ -4,6 +4,7 @@
 # Shadows the packaged omarchy-default-agent to add the Antigravity (agy)
 # option; every other call is handed to the packaged command untouched.
 
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 packaged="${OMARCHY_PATH:-/usr/share/omarchy}/bin/omarchy-default-agent"
 # Never fall back to a bare name: on PATH that resolves to this wrapper's shim.
 if [[ ! -x $packaged ]]; then
@@ -43,7 +44,7 @@ printf '%s\n' antigravity >"$agent_file"
 
 if [[ $installing == "true" ]]; then
   printf '\033[2J\033[3J\033[H'
-  exec omarchy-agent --inline
+  exec bash "$here/omarchy-agent" --inline
 else
-  exec omarchy-agent
+  exec bash "$here/omarchy-agent"
 fi

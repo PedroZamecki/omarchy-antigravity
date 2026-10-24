@@ -4,6 +4,7 @@
 # Shadows the packaged omarchy-agent to launch the Antigravity CLI (agy) when it
 # is the default; every other agent is handed to the packaged command untouched.
 
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 packaged="${OMARCHY_PATH:-/usr/share/omarchy}/bin/omarchy-agent"
 # Never fall back to a bare name: on PATH that resolves to this wrapper's shim.
 if [[ ! -x $packaged ]]; then
@@ -11,7 +12,7 @@ if [[ ! -x $packaged ]]; then
   exit 1
 fi
 
-[[ $(omarchy-default-agent) == "antigravity" ]] || exec "$packaged" "$@"
+[[ $("$here/omarchy-default-agent") == "antigravity" ]] || exec "$packaged" "$@"
 
 inline=false
 prompt=""

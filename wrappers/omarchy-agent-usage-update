@@ -5,8 +5,9 @@
 # command still handles every built-in agent; the only extra code run is this
 # plugin's own collector.
 
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 packaged="${OMARCHY_PATH:-/usr/share/omarchy}/bin/omarchy-agent-usage-update"
-collector="$(dirname "$0")/../bin/omarchy-agent-usage-antigravity"
+collector="$here/../bin/omarchy-agent-usage-antigravity"
 
 # The panel names agents by record id, and this plugin's id is the relative path
 # that lets the panel find assets/antigravity.svg (see provider_id() in the
