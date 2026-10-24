@@ -29,7 +29,7 @@ Omarchy agent option, alongside the agents shipped by `omarchy.agents`.
 
 - **Agent launch** — the bar's agent icon / `omarchy agent` flow launches `agy`
   when Antigravity is the default agent (with `--dangerously-skip-permissions`,
-  or `agy -p "<prompt>"` for a one-shot prompt).
+  or `--prompt-interactive "<prompt>"` for a one-shot prompt).
 
 ## How the subscription record is built
 
@@ -59,13 +59,17 @@ When it is absent, the neutral label `Antigravity` is used.
 
 ## Dependencies and privileges
 
-- **Runtime:** `python3` (collector), `mise` (on-demand install of `agy` from
-  the aqua registry), and `agy` itself for limits.
+- **Runtime:** `python3` (collector), `jq` (menu guard and shims), `mise`
+  (on-demand install of the prebuilt `agy` release from the aqua registry, which
+  downloads it over HTTPS as your user — no root and no local build), and `agy`
+  itself for limits.
 - **Reads:** `~/.gemini/antigravity-cli/` (history, transcripts, and SQLite
   databases opened read-only).
-- **Writes outside the plugin folder:** the menu row and the three shims listed
-  under Install, the usage record in `~/.local/state/omarchy/agents/usage/`,
-  cache files in `~/.cache/omarchy/agent-usage/antigravity-*`, and
+- **Writes outside the plugin folder:** the menu row, the three shims listed
+  under Install, the marked PATH blocks in `~/.bashrc` and
+  `~/.config/hypr/hyprland.lua`, the usage record in
+  `~/.local/state/omarchy/agents/usage/`, cache files in
+  `~/.cache/omarchy/agent-usage/antigravity-*`, and
   `~/.config/omarchy/defaults/agent` when you pick Antigravity.
 - **Runs:** `install.sh` on every shell start (idempotent), the collector every
   5 minutes and after agy activity, and `uninstall.sh` on disable or remove.
@@ -84,33 +88,48 @@ The script is idempotent and safe to re-run by hand after `omarchy refresh`:
 ~/.config/omarchy/plugins/zamecki.antigravity/install.sh
 ```
 
-It touches exactly two places outside the plugin folder:
+It touches exactly three places outside the plugin folder:
 
 1. Adds or updates the `setup.default.agent.antigravity` row in
    `~/.config/omarchy/extensions/omarchy-menu.jsonc`. The row carries a `when:`
-   guard on the plugin folder, so it renders nothing if the plugin is gone.
-2. Writes three small shims into `~/.local/bin/` — `omarchy-default-agent`,
+   guard on the plugin folder, so it renders nothing if the plugin is gone, and
+   calls the wrapper by absolute path so it works even before PATH is updated.
+2. Writes three small shims into
+   `~/.local/share/zamecki.antigravity/bin/` — `omarchy-default-agent`,
    `omarchy-agent`, and `omarchy-agent-usage-update` — so the menu rows, bar
-   launch, and panel refreshes include Antigravity alongside the built-in agents.
-   Each shim only forwards to the matching script in this plugin's `wrappers/`.
+   launch, and panel refreshes include Antigravity alongside the built-in
+   agents. Each shim only forwards to the matching script in this plugin's
+   `wrappers/`. A dedicated directory is used because current Omarchy puts
+   `/usr/share/omarchy/bin` and `/usr/bin` ahead of `~/.local/bin`, where shims
+   would never win.
+3. Adds a marked block to `~/.bashrc` and to `~/.config/hypr/hyprland.lua` that
+   puts that shim directory first on PATH. The menu and agents panel resolve
+   commands through `bash -lc`, and Hyprland dispatches the agent keybinding
+   from its own environment, so both places need it. The blocks are idempotent
+   and removed by `uninstall.sh`.
 
 Nothing is installed system-wide and no backup files are created. The icon font
 (`fonts/omarchy-antigravity.ttf`, a custom glyph built from the Antigravity SVG
 mark) is loaded into the shell process by `Service.qml`, and the usage collector
 runs from `bin/` in place.
 
-`install.sh` refuses to touch a `~/.local/bin` entry it did not create, and
-refuses to write through a symlink, rather than overwriting either.
+`install.sh` refuses to touch a shim or menu row it did not create, and refuses
+to write through a symlink, rather than overwriting either. The PATH blocks are
+inserted only once, after resolving a dotfiles symlink to its target.
 
 ## Known limitations
 
 - The `omarchy default agent <name>` and `omarchy agent` CLI groups are resolved
   by Omarchy's dispatcher from its own `/usr/share/omarchy/bin` directory only,
-  so they keep using the packaged scripts that do not know `antigravity`. The
-  interactive paths (menu selection, menu checked-state, bar launch, keybinding)
-  go through the shell and use the wrappers, so they work. Running
-  `omarchy agent` from a terminal with Antigravity as the default prints a clear
-  message and exits.
+  so they keep using the packaged scripts that do not know `antigravity`.
+  Calling `omarchy-agent` or `omarchy-default-agent` directly works, as do the
+  interactive paths (menu selection, menu checked-state, bar launch,
+  keybinding).
+- **First install in a running session.** The menu and bar pick up the new PATH
+  block immediately because they spawn `bash -lc`. Hyprland only reads
+  `hyprland.lua` at startup, so the agent keybinding starts using the wrapper
+  after a relogin (or `hyprctl reload`). Selecting Antigravity from the menu
+  works right away.
 - **Agents panel icon.** The panel only looks for marks inside its own `assets/`
   folder, so the record `id` is a relative path
   (`../../…/zamecki.antigravity/assets/antigravity`) that resolves to this
@@ -134,8 +153,8 @@ omarchy plugin disable zamecki.antigravity   # or: omarchy plugin remove zamecki
 - The next time anything calls one of the shims (the agents panel's refresh, a
   launch, picking a default agent), the shim sees the plugin disabled or gone,
   runs `uninstall.sh` (or, if the folder is already deleted, removes itself, the
-  usage record and a `defaults/agent` set to `antigravity`), and hands the call
-  to the packaged Omarchy command.
+  PATH blocks, the usage record and a `defaults/agent` set to `antigravity`), and
+  hands the call to the packaged Omarchy command.
 - If the lookup itself fails, the shim keeps working instead of tearing down a
   live install.
 
@@ -146,5 +165,6 @@ To revert everything by hand at any time:
 ```
 
 This removes the menu row, the three shims (only if they still carry this
-plugin's marker), the usage state and cache files, and a `defaults/agent` set
-to `antigravity`. It is idempotent.
+plugin's marker) and their shim directory, the marked PATH blocks from
+`~/.bashrc` and `~/.config/hypr/hyprland.lua`, the usage state and cache files,
+and a `defaults/agent` set to `antigravity`. It is idempotent.
