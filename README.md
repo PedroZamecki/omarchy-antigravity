@@ -85,7 +85,7 @@ Enabling is all that is needed: the service runs `install.sh` itself on load.
 The script is idempotent and safe to re-run by hand after `omarchy refresh`:
 
 ```sh
-~/.config/omarchy/plugins/zamecki.antigravity/install.sh
+~/.config/omarchy/plugins/agy-integration/install.sh
 ```
 
 It touches exactly three places outside the plugin folder:
@@ -95,7 +95,7 @@ It touches exactly three places outside the plugin folder:
    guard on the plugin folder, so it renders nothing if the plugin is gone, and
    calls the wrapper by absolute path so it works even before PATH is updated.
 2. Writes three small shims into
-   `~/.local/share/zamecki.antigravity/bin/` — `omarchy-default-agent`,
+   `~/.local/share/agy-integration/bin/` — `omarchy-default-agent`,
    `omarchy-agent`, and `omarchy-agent-usage-update` — so the menu rows, bar
    launch, and panel refreshes include Antigravity alongside the built-in
    agents. Each shim only forwards to the matching script in this plugin's
@@ -132,7 +132,7 @@ inserted only once, after resolving a dotfiles symlink to its target.
   works right away.
 - **Agents panel icon.** The panel only looks for marks inside its own `assets/`
   folder, so the record `id` is a relative path
-  (`../../…/zamecki.antigravity/assets/antigravity`) that resolves to this
+  (`../../…/agy-integration/assets/antigravity`) that resolves to this
   plugin's SVG. That id therefore contains your home directory path, which also
   lands in synced snapshots when `syncMode` is on. The usage-update shim treats
   that id and `antigravity` as the same agent, so disabling Antigravity in the
@@ -145,7 +145,7 @@ plugin reloads the whole shell, so a plugin cannot run code on the way out), so
 the shims act as the hook:
 
 ```sh
-omarchy plugin disable zamecki.antigravity   # or: omarchy plugin remove zamecki.antigravity
+omarchy plugin disable agy-integration   # or: omarchy plugin remove agy-integration
 ```
 
 - The menu row's `when:` guard asks `omarchy plugin list` whether the plugin is
@@ -161,7 +161,7 @@ omarchy plugin disable zamecki.antigravity   # or: omarchy plugin remove zamecki
 To revert everything by hand at any time:
 
 ```sh
-~/.config/omarchy/plugins/zamecki.antigravity/uninstall.sh
+~/.config/omarchy/plugins/agy-integration/uninstall.sh
 ```
 
 This removes the menu row, the three shims (only if they still carry this

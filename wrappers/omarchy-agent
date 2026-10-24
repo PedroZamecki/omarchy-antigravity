@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# zamecki.antigravity: Launch the default coding agent in a terminal.
+# agy-integration: Launch the default coding agent in a terminal.
 # Shadows the packaged omarchy-agent to launch the Antigravity CLI (agy) when it
 # is the default; every other agent is handed to the packaged command untouched.
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# zamecki.antigravity uninstaller.
+# agy-integration uninstaller.
 #
 # Undoes everything done by install.sh:
 # - Removes the Defaults -> Agent menu entry
@@ -19,19 +19,19 @@ set -euo pipefail
 MENU_FILE="$HOME/.config/omarchy/extensions/omarchy-menu.jsonc"
 MENU_ID="setup.default.agent.antigravity"
 MENU_LINE_RE="^[[:space:]]*\"${MENU_ID//./\\.}\"[[:space:]]*:"
-SHIM_DIR="$HOME/.local/share/zamecki.antigravity/bin"
+SHIM_DIR="$HOME/.local/share/agy-integration/bin"
 LEGACY_BIN_DIR="$HOME/.local/bin"
 SHIMS=(omarchy-default-agent omarchy-agent omarchy-agent-usage-update)
-MARKER='# zamecki.antigravity shim'
+MARKER='# agy-integration shim'
 STATE_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agents/usage/antigravity.json"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy/agent-usage"
 DEFAULT_AGENT_FILE="$HOME/.config/omarchy/defaults/agent"
 BASH_RC="$HOME/.bashrc"
 HYPR_LUA="$HOME/.config/hypr/hyprland.lua"
-BASH_BLOCK_START='# >>> zamecki.antigravity >>>'
-BASH_BLOCK_END='# <<< zamecki.antigravity <<<'
-HYPR_BLOCK_START='-- >>> zamecki.antigravity >>>'
-HYPR_BLOCK_END='-- <<< zamecki.antigravity <<<'
+BASH_BLOCK_START='# >>> agy-integration >>>'
+BASH_BLOCK_END='# <<< agy-integration <<<'
+HYPR_BLOCK_START='-- >>> agy-integration >>>'
+HYPR_BLOCK_END='-- <<< agy-integration <<<'
 
 # --- Menu row ---------------------------------------------------------------
 # install.sh writes the row as one line, so dropping that line is the whole
@@ -108,4 +108,4 @@ if [[ -f $DEFAULT_AGENT_FILE ]] && [[ "$(< "$DEFAULT_AGENT_FILE")" == "antigravi
   echo "defaults: cleared antigravity default agent setting"
 fi
 
-echo "zamecki.antigravity: uninstall complete"
+echo "agy-integration: uninstall complete"

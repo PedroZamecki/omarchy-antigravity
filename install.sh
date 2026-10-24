@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# zamecki.antigravity installer.
+# agy-integration installer.
 #
 # Adds the Antigravity entry to the Defaults -> Agent menu, installs the shims
 # that route omarchy-default-agent / omarchy-agent / omarchy-agent-usage-update
@@ -17,19 +17,19 @@ MENU_LINE_RE="^[[:space:]]*\"${MENU_ID//./\\.}\"[[:space:]]*:"
 # A dedicated directory rather than ~/.local/bin. Current Omarchy puts
 # /usr/share/omarchy/bin (and /usr/bin) ahead of ~/.local/bin, so shims there
 # never win; only these three names need the earlier precedence.
-SHIM_DIR="$HOME/.local/share/zamecki.antigravity/bin"
+SHIM_DIR="$HOME/.local/share/agy-integration/bin"
 LEGACY_BIN_DIR="$HOME/.local/bin"
 SHIMS=(omarchy-default-agent omarchy-agent omarchy-agent-usage-update)
-MARKER='# zamecki.antigravity shim'
+MARKER='# agy-integration shim'
 # Matches both the shims below and the full wrapper copies older versions
 # installed, so an upgrade replaces its own files instead of refusing them.
-OWNED_RE='^# zamecki\.antigravity'
+OWNED_RE='^# agy-integration'
 BASH_RC="$HOME/.bashrc"
 HYPR_LUA="$HOME/.config/hypr/hyprland.lua"
-BASH_BLOCK_START='# >>> zamecki.antigravity >>>'
-BASH_BLOCK_END='# <<< zamecki.antigravity <<<'
-HYPR_BLOCK_START='-- >>> zamecki.antigravity >>>'
-HYPR_BLOCK_END='-- <<< zamecki.antigravity <<<'
+BASH_BLOCK_START='# >>> agy-integration >>>'
+BASH_BLOCK_END='# <<< agy-integration <<<'
+HYPR_BLOCK_START='-- >>> agy-integration >>>'
+HYPR_BLOCK_END='-- <<< agy-integration <<<'
 
 missing=()
 for dep in bash jq python3 mise; do
@@ -55,7 +55,7 @@ owned_by_plugin() {
 # works even in a shell whose PATH has not been updated yet.
 WRAPPER="$PLUGIN_DIR/wrappers/omarchy-default-agent"
 ROW=$(cat <<ROW_EOF
-  "$MENU_ID": {"icon":"\ue908","iconFont":"omarchy-antigravity","label":"Antigravity","when":"omarchy plugin list --json | jq -e '.[] | select(.id == \"zamecki.antigravity\" and .enabled)' >/dev/null","checked":"[[ \"\$(bash \"$WRAPPER\")\" == \"antigravity\" ]]","action":"bash \"$WRAPPER\" antigravity"},
+  "$MENU_ID": {"icon":"\ue908","iconFont":"omarchy-antigravity","label":"Antigravity","when":"omarchy plugin list --json | jq -e '.[] | select(.id == \"agy-integration\" and .enabled)' >/dev/null","checked":"[[ \"\$(bash \"$WRAPPER\")\" == \"antigravity\" ]]","action":"bash \"$WRAPPER\" antigravity"},
 ROW_EOF
 )
 
@@ -203,7 +203,7 @@ strip_block() {
   awk -v s="\$s" -v e="\$e" '\$0 == s { skip = 1; next } skip && \$0 == e { skip = 0; next } !skip { print }' "\$f" >"\$t" &&
     chmod --reference="\$f" "\$t" && mv -f "\$t" "\$f"
 }
-if [[ ! -d \$plugin || \$(omarchy plugin list --json 2>/dev/null | jq -r '.[] | select(.id == "zamecki.antigravity") | .enabled') == false ]]; then
+if [[ ! -d \$plugin || \$(omarchy plugin list --json 2>/dev/null | jq -r '.[] | select(.id == "agy-integration") | .enabled') == false ]]; then
   if [[ -f \$plugin/uninstall.sh ]]; then
     bash "\$plugin/uninstall.sh" >/dev/null
   else
@@ -211,8 +211,8 @@ if [[ ! -d \$plugin || \$(omarchy plugin list --json 2>/dev/null | jq -r '.[] | 
     rmdir "\${0%/*}" 2>/dev/null || true
     rm -f "\${XDG_STATE_HOME:-\$HOME/.local/state}/omarchy/agents/usage/antigravity.json"
     [[ \$(cat "\$HOME/.config/omarchy/defaults/agent" 2>/dev/null) == antigravity ]] && rm -f "\$HOME/.config/omarchy/defaults/agent"
-    strip_block "\$HOME/.bashrc" '# >>> zamecki.antigravity >>>' '# <<< zamecki.antigravity <<<'
-    strip_block "\$HOME/.config/hypr/hyprland.lua" '-- >>> zamecki.antigravity >>>' '-- <<< zamecki.antigravity <<<'
+    strip_block "\$HOME/.bashrc" '# >>> agy-integration >>>' '# <<< agy-integration <<<'
+    strip_block "\$HOME/.config/hypr/hyprland.lua" '-- >>> agy-integration >>>' '-- <<< agy-integration <<<'
   fi
   exec "\${OMARCHY_PATH:-/usr/share/omarchy}/bin/$name" "\$@"
 fi
@@ -221,4 +221,4 @@ SHIM
   echo "shim: installed $SHIM_DIR/$name"
 done
 
-echo "zamecki.antigravity: install complete"
+echo "agy-integration: install complete"

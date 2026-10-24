@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# zamecki.antigravity: Shadows the packaged omarchy-agent-usage-update so the
+# agy-integration: Shadows the packaged omarchy-agent-usage-update so the
 # agents panel's refreshes also regenerate the Antigravity record. The packaged
 # command still handles every built-in agent; the only extra code run is this
 # plugin's own collector.
@@ -12,7 +12,7 @@ collector="$here/../bin/omarchy-agent-usage-antigravity"
 # The panel names agents by record id, and this plugin's id is the relative path
 # that lets the panel find assets/antigravity.svg (see provider_id() in the
 # collector), so accept it alongside the plain name.
-ours() { [[ $1 == "antigravity" || $1 == */zamecki.antigravity/assets/antigravity ]]; }
+ours() { [[ $1 == "antigravity" || $1 == */agy-integration/assets/antigravity ]]; }
 
 args=("$@")
 flags=()

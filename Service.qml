@@ -9,7 +9,7 @@ Item {
   property var manifest: null
 
   readonly property string home: Quickshell.env("HOME") || ""
-  readonly property string pluginDir: manifest && manifest.__sourceDir ? manifest.__sourceDir : (home + "/.config/omarchy/plugins/zamecki.antigravity")
+  readonly property string pluginDir: manifest && manifest.__sourceDir ? manifest.__sourceDir : (home + "/.config/omarchy/plugins/agy-integration")
   readonly property string collectorPath: pluginDir + "/bin/omarchy-agent-usage-antigravity"
   readonly property string historyFile: home + "/.gemini/antigravity-cli/history.jsonl"
   readonly property string cliConversationsDir: home + "/.gemini/antigravity-cli/conversations"
@@ -35,7 +35,7 @@ Item {
     running: false
     stderr: StdioCollector {
       waitForEnd: true
-      onStreamFinished: if (text.trim() !== "") console.warn("zamecki.antigravity install: " + text.trim())
+      onStreamFinished: if (text.trim() !== "") console.warn("agy-integration install: " + text.trim())
     }
     onExited: root.runCollector(false)
   }
@@ -95,12 +95,12 @@ Item {
 
     stderr: StdioCollector {
       waitForEnd: true
-      onStreamFinished: if (text.trim() !== "") console.warn("zamecki.antigravity", text.trim())
+      onStreamFinished: if (text.trim() !== "") console.warn("agy-integration", text.trim())
     }
 
     onExited: function(exitCode) {
       if (exitCode !== 0) {
-        console.warn("zamecki.antigravity: collector failed with exit " + exitCode)
+        console.warn("agy-integration: collector failed with exit " + exitCode)
       }
     }
   }
